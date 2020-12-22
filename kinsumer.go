@@ -471,6 +471,29 @@ func (k *Kinsumer) Next() (data []byte, err error) {
 	return data, err
 }
 
+// NextRecord is a blocking function used to get the next record from the kinesis queue, or errors that
+// occurred during the processing of kinesis. It's up to the caller to stop processing by calling 'Stop()'
+//
+// if err is non nil an error occurred in the system.
+// if err is nil and record is nil then kinsumer has been stopped
+func (k *Kinsumer) NextRecord() (rec *kinesis.Record, err error) {
+	if k.config.manualCheckpointing {
+		return nil, fmt.Errorf("manual checkpointing is enabled, use NextRecordWithCheckpointer() instead")
+	}
+
+	select {
+	case err = <-k.errors:
+		return nil, err
+	case record, ok := <-k.output:
+		if ok {
+			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
+			rec = record.record
+		}
+	}
+
+	return rec, err
+}
+
 // NextWithCheckpointer is a blocking function used to get the next record from the kinesis queue, or errors that
 // occurred during the processing of kinesis. It's up to the caller to stop processing by calling 'Stop()'
 // checkpointer must be called when the record is fully processed. Kinsumer will ensure checkpointer calls are ordered.
@@ -495,6 +518,32 @@ func (k *Kinsumer) NextWithCheckpointer() (data []byte, checkpointer func(), err
 	}
 
 	return data, checkpointer, err
+}
+
+// NextRecordWithCheckpointer is a blocking function used to get the next record from the kinesis queue, or errors that
+// occurred during the processing of kinesis. It's up to the caller to stop processing by calling 'Stop()'
+// checkpointer must be called when the record is fully processed. Kinsumer will ensure checkpointer calls are ordered.
+// WARNING: checkpointer() can block indefinitely if not called in order.
+//
+// if err is non nil an error occurred in the system.
+// if err is nil and data is nil then kinsumer has been stopped
+func (k *Kinsumer) NextRecordWithCheckpointer() (rec *kinesis.Record, checkpointer func(), err error) {
+	if !k.config.manualCheckpointing {
+		return nil, nil, fmt.Errorf("manual checkpointing is disabled, use NextRecord() instead")
+	}
+
+	select {
+	case err = <-k.errors:
+		return nil, nil, err
+	case record, ok := <-k.output:
+		if ok {
+			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
+			rec = record.record
+			checkpointer = record.checkpointer.updateFunc(aws.StringValue(record.record.SequenceNumber))
+		}
+	}
+
+	return rec, checkpointer, err
 }
 
 // CreateRequiredTables will create the required dynamodb tables
