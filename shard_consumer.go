@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 )
@@ -27,13 +28,16 @@ const (
 )
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
-func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string) (string, error) {
+func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time) (string, error) {
 	shardIteratorType := kinesis.ShardIteratorTypeAfterSequenceNumber
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
 	// from the horizon
 	ps := aws.String(sequenceNumber)
-	if sequenceNumber == "" {
+	if sequenceNumber == "" && iteratorStartTimestamp != nil {
+		shardIteratorType = kinesis.ShardIteratorTypeAtTimestamp
+		ps = nil
+	} else if sequenceNumber == "" {
 		shardIteratorType = kinesis.ShardIteratorTypeTrimHorizon
 		ps = nil
 	} else if sequenceNumber == "LATEST" {
@@ -46,6 +50,7 @@ func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID stri
 		ShardIteratorType:      &shardIteratorType,
 		StartingSequenceNumber: ps,
 		StreamName:             aws.String(streamName),
+		Timestamp:              iteratorStartTimestamp,
 	})
 	return aws.StringValue(resp.ShardIterator), err
 }
@@ -139,7 +144,7 @@ func (k *Kinsumer) consume(shardID string) {
 	}()
 
 	// Get the starting shard iterator
-	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber)
+	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber, k.config.iteratorStartTimestamp)
 	if err != nil {
 		k.shardErrors <- shardConsumerError{shardID: shardID, action: "getShardIterator", err: err}
 		return
@@ -194,7 +199,9 @@ mainloop:
 					origErrStr = fmt.Sprintf("(%s) ", awsErr.OrigErr())
 				}
 				k.config.logger.Log("Got error: %s %s %sretry count is %d / %d", awsErr.Code(), awsErr.Message(), origErrStr, retryCount, maxErrorRetries)
-				if retryCount < maxErrorRetries {
+				// Only retry for errors that should be retried; notably, don't retry serialization errors because something bad is happening
+				shouldRetry := request.IsErrorRetryable(err) || request.IsErrorThrottle(err)
+				if shouldRetry && retryCount < maxErrorRetries {
 					retryCount++
 
 					// casting retryCount here to time.Duration purely for the multiplication, there is
