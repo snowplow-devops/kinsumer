@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
@@ -26,10 +27,9 @@ import (
 
 var (
 	awsRegion             = flag.String("region", "us-west-2", "Region to run tests in")
-	dynamoEndpoint        = flag.String("dynamo_endpoint", "http://localhost:4567", "Endpoint for dynamo test server")
+	dynamoEndpoint        = flag.String("dynamo_endpoint", "http://localhost:4566", "Endpoint for dynamo test server")
 	kinesisEndpoint       = flag.String("kinesis_endpoint", "http://localhost:4568", "Endpoint for kinesis test server")
 	resourceChangeTimeout = flag.Duration("resource_change_timeout", 50*time.Millisecond, "Timeout between changes to the resource infrastructure")
-	streamName            = flag.String("stream_name", "kinsumer_test", "Name of kinesis stream to use for tests")
 	applicationName       = flag.String("application_name", "kinsumer_test", "Name of the application, will impact dynamo table names")
 )
 
@@ -69,9 +69,9 @@ func TestNewWithInterfaces(t *testing.T) {
 	assert.NotEqual(t, kinsumer, nil)
 }
 
-func CreateFreshStream(t *testing.T, k kinesisiface.KinesisAPI) error {
+func createFreshStream(t *testing.T, k kinesisiface.KinesisAPI, streamName string, shardCount int64) error {
 	_, err := k.DeleteStream(&kinesis.DeleteStreamInput{
-		StreamName: streamName,
+		StreamName: &streamName,
 	})
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
@@ -86,25 +86,39 @@ func CreateFreshStream(t *testing.T, k kinesisiface.KinesisAPI) error {
 
 	_, err = k.CreateStream(&kinesis.CreateStreamInput{
 		ShardCount: aws.Int64(shardCount),
-		StreamName: streamName,
+		StreamName: &streamName,
 	})
 
 	if err != nil {
 		return err
 	}
-	time.Sleep(*resourceChangeTimeout)
+	for {
+		res, err1 := k.DescribeStream(&kinesis.DescribeStreamInput{
+			StreamName: aws.String(streamName),
+		})
+		if err1 != nil {
+			return err1
+		}
 
-	return nil
+		if *res.StreamDescription.StreamStatus == "ACTIVE" {
+			return nil
+		}
+	}
 }
 
-func SetupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
-	err := CreateFreshStream(t, k)
+// TODO: factor out the setup to a utils package for a cleaner instrumentation?
+// TODO: Add tests for our customisations in this fork
+func setupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI, streamName string, shardCount int64) error {
+	err := createFreshStream(t, k, streamName, shardCount)
 	if err != nil {
 		return fmt.Errorf("Error creating fresh stream: %s", err)
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	client, clientErr := NewWithInterfaces(k, d, streamName, *applicationName, "N/A", testConf)
+	if clientErr != nil {
+		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
+	}
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -115,7 +129,41 @@ func SetupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbifa
 	if err != nil {
 		return fmt.Errorf("Error creating fresh tables: %s", err)
 	}
-	return nil
+
+	// block until all three tables have been created
+	for {
+		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.checkpointTableName})
+		if err1 != nil {
+			return err1
+		}
+
+		if *res.Table.TableStatus == "ACTIVE" {
+			break
+		}
+	}
+
+	for {
+		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.clientsTableName})
+		if err1 != nil {
+			return err1
+		}
+
+		if *res.Table.TableStatus == "ACTIVE" {
+			break
+		}
+	}
+
+	for {
+		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.metadataTableName})
+		if err1 != nil {
+			return err1
+		}
+
+		if *res.Table.TableStatus == "ACTIVE" {
+			return nil
+		}
+	}
+
 }
 
 func ignoreResourceNotFound(err error) error {
@@ -132,9 +180,9 @@ func ignoreResourceNotFound(err error) error {
 	return nil
 }
 
-func CleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
+func cleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI, streamName string) error {
 	_, err := k.DeleteStream(&kinesis.DeleteStreamInput{
-		StreamName: streamName,
+		StreamName: &streamName,
 	})
 
 	if e := ignoreResourceNotFound(err); e != nil {
@@ -142,7 +190,10 @@ func CleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbi
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "", testConf)
+	client, clientErr := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	if clientErr != nil {
+		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
+	}
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -161,7 +212,8 @@ func randStringBytes(n int) string {
 	return string(b)
 }
 
-func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error {
+func spamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64, streamName string) error {
+
 	var (
 		records []*kinesis.PutRecordsRequestEntry
 		counter int64
@@ -175,26 +227,29 @@ func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error 
 
 		if len(records) == 100 {
 			pro, err := k.PutRecords(&kinesis.PutRecordsInput{
-				StreamName: streamName,
+				StreamName: &streamName,
 				Records:    records,
 			})
 
 			if err != nil {
 				return fmt.Errorf("Error putting records onto stream: %s", err)
 			}
+
 			failed := aws.Int64Value(pro.FailedRecordCount)
 			require.EqualValues(t, 0, failed)
 			records = nil
 		}
 	}
 	if len(records) > 0 {
+
 		pro, err := k.PutRecords(&kinesis.PutRecordsInput{
-			StreamName: streamName,
+			StreamName: &streamName,
 			Records:    records,
 		})
 		if err != nil {
 			return fmt.Errorf("Error putting records onto stream: %s", err)
 		}
+
 		failed := aws.Int64Value(pro.FailedRecordCount)
 		require.EqualValues(t, 0, failed)
 	}
@@ -202,13 +257,13 @@ func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error 
 	return nil
 }
 
-func KinesisAndDynamoInstances() (kinesisiface.KinesisAPI, dynamodbiface.DynamoDBAPI) {
-	kc := aws.NewConfig().WithRegion(*awsRegion).WithLogLevel(3)
+func kinesisAndDynamoInstances() (kinesisiface.KinesisAPI, dynamodbiface.DynamoDBAPI) {
+	kc := aws.NewConfig().WithRegion(*awsRegion).WithCredentials(credentials.NewStaticCredentials("foo", "var", "")).WithLogLevel(3)
 	if len(*kinesisEndpoint) > 0 {
 		kc = kc.WithEndpoint(*kinesisEndpoint)
 	}
 
-	dc := aws.NewConfig().WithRegion(*awsRegion).WithLogLevel(3)
+	dc := aws.NewConfig().WithRegion(*awsRegion).WithCredentials(credentials.NewStaticCredentials("foo", "var", "")).WithLogLevel(3)
 	if len(*dynamoEndpoint) > 0 {
 		dc = dc.WithEndpoint(*dynamoEndpoint)
 	}
@@ -219,22 +274,22 @@ func KinesisAndDynamoInstances() (kinesisiface.KinesisAPI, dynamodbiface.DynamoD
 	return k, d
 }
 
-func TestSetup(t *testing.T) {
+func testSetup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := KinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := cleanupTestEnvironment(t, k, d, "testSetupStream")
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := setupTestEnvironment(t, k, d, "testSetupStream", shardCount)
 	require.NoError(t, err, "Problems setting up the test environment")
 
-	err = SpamStream(t, k, 233)
+	err = spamStream(t, k, 233, "testSetupStream")
 	require.NoError(t, err, "Problems spamming stream with events")
 
 }
@@ -244,20 +299,21 @@ func TestKinsumer(t *testing.T) {
 	const (
 		numberOfEventsToTest = 4321
 		numberOfClients      = 3
+		streamName           = "TestKinsumer_stream"
 	)
 
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := KinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := cleanupTestEnvironment(t, k, d, streamName)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := setupTestEnvironment(t, k, d, streamName, shardCount)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -269,13 +325,14 @@ func TestKinsumer(t *testing.T) {
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
 	config = config.WithShardCheckFrequency(500 * time.Millisecond)
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config = config.WithCommitFrequency(100 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 
 		err = clients[i].Run()
@@ -304,7 +361,7 @@ func TestKinsumer(t *testing.T) {
 		}(i)
 	}
 
-	err = SpamStream(t, k, numberOfEventsToTest)
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
 	readEvents(t, output, numberOfEventsToTest)
@@ -325,20 +382,21 @@ func TestLeader(t *testing.T) {
 	const (
 		numberOfEventsToTest = 4321
 		numberOfClients      = 2
+		streamName           = "TestLeader_stream"
 	)
 
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := KinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := cleanupTestEnvironment(t, k, d, streamName)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := setupTestEnvironment(t, k, d, streamName, shardCount)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -356,7 +414,7 @@ func TestLeader(t *testing.T) {
 	})
 	require.NoError(t, err, "Problems converting old client")
 
-	clientsTableName := aws.String(*streamName + "_clients")
+	clientsTableName := aws.String(*applicationName + "_clients")
 	_, err = d.PutItem(&dynamodb.PutItemInput{
 		TableName: clientsTableName,
 		Item:      item,
@@ -366,13 +424,14 @@ func TestLeader(t *testing.T) {
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
 	config = config.WithShardCheckFrequency(500 * time.Millisecond)
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config = config.WithCommitFrequency(100 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
@@ -399,9 +458,8 @@ func TestLeader(t *testing.T) {
 		}(i)
 	}
 
-	err = SpamStream(t, k, numberOfEventsToTest)
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
-
 	readEvents(t, output, numberOfEventsToTest)
 
 	resp, err := d.GetItem(&dynamodb.GetItemInput{
@@ -417,15 +475,18 @@ func TestLeader(t *testing.T) {
 	assert.Equal(t, true, clients[0].isLeader, "First client is not leader")
 	assert.Equal(t, false, clients[1].isLeader, "Second leader is also leader")
 
-	c, err := NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
+	c, err := NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
 	require.NoError(t, err, "NewWithInterfaces() failed")
 	c.clientID = "0"
+
 	err = c.Run()
 	require.NoError(t, err, "kinsumer.Run() failed")
 	require.Equal(t, true, c.isLeader, "New client is not leader")
 	_, err = clients[0].refreshShards()
 	require.NoError(t, err, "Problem refreshing shards of original leader")
+
 	require.Equal(t, false, clients[0].isLeader, "Original leader is still leader")
+
 	c.Stop()
 
 	for ci, client := range clients {
@@ -434,6 +495,7 @@ func TestLeader(t *testing.T) {
 	}
 
 	drain(t, output)
+
 	// Make sure the go routines have finished
 	waitGroup.Wait()
 }
@@ -444,19 +506,20 @@ func TestSplit(t *testing.T) {
 		numberOfEventsToTest = 4321
 		numberOfClients      = 3
 	)
+	streamName := "TestSplit_stream"
 
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := KinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := cleanupTestEnvironment(t, k, d, streamName)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := setupTestEnvironment(t, k, d, streamName, shardCount)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -474,7 +537,7 @@ func TestSplit(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
@@ -501,13 +564,13 @@ func TestSplit(t *testing.T) {
 		}(i)
 	}
 
-	err = SpamStream(t, k, numberOfEventsToTest)
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
 	readEvents(t, output, numberOfEventsToTest)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
-		StreamName: streamName,
+		StreamName: &streamName,
 		Limit:      aws.Int64(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
@@ -520,7 +583,7 @@ func TestSplit(t *testing.T) {
 	require.True(t, len(shards) >= 2, "Fewer than 2 shards")
 
 	_, err = k.MergeShards(&kinesis.MergeShardsInput{
-		StreamName:           streamName,
+		StreamName:           &streamName,
 		ShardToMerge:         aws.String(*shards[0].ShardId),
 		AdjacentShardToMerge: aws.String(*shards[1].ShardId),
 	})
@@ -530,7 +593,7 @@ func TestSplit(t *testing.T) {
 	timeout := time.After(time.Second)
 	for {
 		desc, err = k.DescribeStream(&kinesis.DescribeStreamInput{
-			StreamName: streamName,
+			StreamName: &streamName,
 			Limit:      aws.Int64(shardLimit),
 		})
 		require.NoError(t, err, "Error describing stream")
@@ -547,7 +610,7 @@ func TestSplit(t *testing.T) {
 	newShards := desc.StreamDescription.Shards
 	require.Equal(t, shardCount+1, int64(len(newShards)), "Wrong number of shards after merging")
 
-	err = SpamStream(t, k, numberOfEventsToTest)
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
 	readEvents(t, output, numberOfEventsToTest)
@@ -556,7 +619,7 @@ func TestSplit(t *testing.T) {
 	// by itself it passes without the sleep but when running all the tests
 	// it fails. Since we delete all tables I suspect it's kinesalite having
 	// issues.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1000 * time.Millisecond)
 	// Validate finished shards are no longer in the cache
 	var expectedShards []string
 	for _, shard := range newShards {
@@ -608,7 +671,7 @@ ProcessLoop:
 			if total == numberOfEventsToTest {
 				break ProcessLoop
 			}
-		case <-time.After(3 * time.Second):
+		case <-time.After(5 * time.Second):
 			break ProcessLoop
 		}
 	}

@@ -56,3 +56,6 @@ Temporary Items
 .apdisk
 
 .arcconfig
+
+# Temporary integration test infrastructre
+integration/.localstack
