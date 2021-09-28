@@ -26,7 +26,7 @@ import (
 
 var (
 	awsRegion             = flag.String("region", "us-west-2", "Region to run tests in")
-	dynamoEndpoint        = flag.String("dynamo_endpoint", "http://localhost:4567", "Endpoint for dynamo test server")
+	dynamoEndpoint        = flag.String("dynamo_endpoint", "http://localhost:4566", "Endpoint for dynamo test server")
 	kinesisEndpoint       = flag.String("kinesis_endpoint", "http://localhost:4568", "Endpoint for kinesis test server")
 	resourceChangeTimeout = flag.Duration("resource_change_timeout", 50*time.Millisecond, "Timeout between changes to the resource infrastructure")
 	streamName            = flag.String("stream_name", "kinsumer_test", "Name of kinesis stream to use for tests")
@@ -104,7 +104,10 @@ func SetupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbifa
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	client, clientErr := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	if clientErr != nil {
+		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
+	}
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -142,7 +145,10 @@ func CleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbi
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "", testConf)
+	client, clientErr := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	if clientErr != nil {
+		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
+	}
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -267,8 +273,8 @@ func TestKinsumer(t *testing.T) {
 	var waitGroup sync.WaitGroup
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
+	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -364,8 +370,8 @@ func TestLeader(t *testing.T) {
 	require.NoError(t, err, "Problems putting old client")
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
+	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -465,8 +471,8 @@ func TestSplit(t *testing.T) {
 	var waitGroup sync.WaitGroup
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
+	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
