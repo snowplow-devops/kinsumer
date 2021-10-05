@@ -25,8 +25,12 @@ type Config struct {
 	// Delay between tests for the client or shard numbers changing
 	shardCheckFrequency time.Duration
 
+	// Max age for client record before we consider it stale
+	clientRecordMaxAge *time.Duration
+
 	// Starting timestamp of the shard iterator, if "AT_TIMESTAMP" is the desired iterator type
 	iteratorStartTimestamp *time.Time
+
 	// ---------- [ For the leader (first client alphabetically) ] ----------
 	// Time between leader actions
 	leaderActionFrequency time.Duration
@@ -87,6 +91,12 @@ func (c Config) WithCommitFrequency(commitFrequency time.Duration) Config {
 // WithShardCheckFrequency returns a Config with a modified shard check frequency
 func (c Config) WithShardCheckFrequency(shardCheckFrequency time.Duration) Config {
 	c.shardCheckFrequency = shardCheckFrequency
+	return c
+}
+
+// WithClientRecordMaxAge returns a config with a modified client record max age
+func (c Config) WithClientRecordMaxAge(clientRecordMaxAge *time.Duration) Config {
+	c.clientRecordMaxAge = clientRecordMaxAge
 	return c
 }
 
@@ -154,6 +164,10 @@ func validateConfig(c *Config) error {
 
 	if c.leaderActionFrequency == 0 {
 		return ErrConfigInvalidLeaderActionFrequency
+	}
+
+	if c.clientRecordMaxAge != nil && *c.clientRecordMaxAge < c.shardCheckFrequency {
+		return ErrConfigInvalidClientRecordMaxAge
 	}
 
 	if c.shardCheckFrequency > c.leaderActionFrequency {

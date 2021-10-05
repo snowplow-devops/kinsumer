@@ -26,6 +26,8 @@ var (
 	ErrConfigInvalidCommitFrequency = errors.New("commitFrequency config value is mandatory")
 	// ErrConfigInvalidShardCheckFrequency - ShardCheckFrequency config value is mandatory
 	ErrConfigInvalidShardCheckFrequency = errors.New("shardCheckFrequency config value is mandatory")
+	// ErrConfigInvalidClientRecordMaxAge - clientRecordMaxAge must be longer than shardCheckFrequency
+	ErrConfigInvalidClientRecordMaxAge = errors.New("clientRecordMaxAge value must be at least as long as shardCheckFrequency")
 	// ErrConfigInvalidLeaderActionFrequency - LeaderActionFrequency config value is mandatory
 	ErrConfigInvalidLeaderActionFrequency = errors.New("leaderActionFrequency config value is mandatory and must be at least as long as ShardCheckFrequency")
 	// ErrConfigInvalidBufferSize - BufferSize config value is mandatory
