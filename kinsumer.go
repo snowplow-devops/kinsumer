@@ -96,6 +96,10 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
+	if config.clientRecordMaxAge == nil { // set default for max age if not manually set
+		maxAge := config.shardCheckFrequency * 5
+		config.clientRecordMaxAge = &maxAge
+	}
 
 	consumer := &Kinsumer{
 		streamName:            streamName,
@@ -112,7 +116,7 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 		clientID:              uuid.New().String(),
 		clientName:            clientName,
 		config:                config,
-		maxAgeForClientRecord: config.shardCheckFrequency * 5,
+		maxAgeForClientRecord: *config.clientRecordMaxAge,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
 	}
 	return consumer, nil
