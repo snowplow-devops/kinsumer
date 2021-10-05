@@ -85,6 +85,10 @@ func (k *Kinsumer) becomeLeader() {
 
 // unbecomeLeader stops the leadership goroutine.
 func (k *Kinsumer) unbecomeLeader() {
+	// Lock until we're done
+	k.unbecomingLeader.Lock()
+	defer k.unbecomingLeader.Unlock()
+
 	if !k.isLeader {
 		return
 	}
