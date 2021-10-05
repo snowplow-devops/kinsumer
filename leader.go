@@ -37,6 +37,7 @@ func (k *Kinsumer) becomeLeader() {
 	if k.isLeader {
 		return
 	}
+	// TODO: figure out if we need to do anything about unbecomingLeader here...
 	k.leaderLost = make(chan bool)
 	k.leaderWG.Add(1)
 	go func() {
@@ -88,6 +89,16 @@ func (k *Kinsumer) unbecomeLeader() {
 	if !k.isLeader {
 		return
 	}
+	// TODO: 1. Perform this check first for simpler instrumentation. 2. Poll k.unbecomingLeader instead of waiting for the working group?
+	if k.unbecomingLeader {
+		k.leaderWG.Wait()
+		time.Sleep(1 * time.Second) // Is this necessary?
+		if !k.isLeader {
+			return
+		}
+	}
+
+	k.unbecomingLeader = true
 	if k.leaderLost == nil {
 		k.config.logger.Log("Lost leadership but k.leaderLost was nil")
 	} else {
@@ -96,6 +107,7 @@ func (k *Kinsumer) unbecomeLeader() {
 		k.leaderLost = nil
 	}
 	k.isLeader = false
+	k.unbecomingLeader = false
 }
 
 // performLeaderActions updates the shard ID cache and reaps old clients
