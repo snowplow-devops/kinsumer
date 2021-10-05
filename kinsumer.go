@@ -56,6 +56,7 @@ type Kinsumer struct {
 	config                Config                    // configuration struct
 	numberOfRuns          int32                     // Used to atomically make sure we only ever allow one Run() to be called
 	isLeader              bool                      // Whether this client is the leader
+	unbecomingLeader      sync.Mutex                // Flag to avoid race condition when unbecoming leader
 	leaderLost            chan bool                 // Channel that receives an event when the node loses leadership
 	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
 	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
