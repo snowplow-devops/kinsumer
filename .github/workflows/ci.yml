@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches:
+    - '*'
+    - '*/*'
+    - '**'
+
+jobs:
+  test:
+    name: Compile & Test
+    strategy:
+      matrix:
+        go-version: [1.17]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Install Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Cache go modules
+      uses: actions/cache@v2
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Setup integration resources
+      run: make integration-up
+
+    - name: Run integration tests
+      run: GO111MODULE=on go test ./... -v
+
+
+
+#    - name: Block Concurrent Executions of Integration Tests
+#      if: ${{ env.NGROK_TOKEN != '' }} 
+#      uses: softprops/turnstyle@v1
+#      with:
+#        poll-interval-seconds: 10
+#        same-branch-only: false
+#      env:
+#        GITHUB_TOKEN: ${{ github.token }}
+
+#    - name: Setup integration resources
+#      run: export NGROK_DIR=$GITHUB_WORKSPACE/bin/ && make integration-up
+
+#    - name: Run integration & unit tests
+#      run: make integration-test
+
+#    - name: Compile all targets
+#      run: make all
