@@ -94,6 +94,7 @@ func (c Config) WithShardCheckFrequency(shardCheckFrequency time.Duration) Confi
 	return c
 }
 
+// WithClientRecordMaxAge returns a config with a modified client record max age
 func (c Config) WithClientRecordMaxAge(clientRecordMaxAge *time.Duration) Config {
 	c.clientRecordMaxAge = clientRecordMaxAge
 	return c
