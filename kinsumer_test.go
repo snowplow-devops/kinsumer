@@ -534,8 +534,8 @@ func testSplit(t *testing.T) {
 	var waitGroup sync.WaitGroup
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
-	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
+	config = config.WithShardCheckFrequency(500 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
+	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
@@ -625,7 +625,7 @@ func testSplit(t *testing.T) {
 	// by itself it passes without the sleep but when running all the tests
 	// it fails. Since we delete all tables I suspect it's kinesalite having
 	// issues.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1000 * time.Millisecond) // extending timeout to 1s to see if failed CI runs are just a timing issue
 	// Validate finished shards are no longer in the cache
 	var expectedShards []string
 	for _, shard := range newShards {
@@ -636,7 +636,7 @@ func testSplit(t *testing.T) {
 	sort.Strings(expectedShards)
 	cachedShards, err := loadShardIDsFromDynamo(d, clients[0].metadataTableName)
 	require.NoError(t, err, "Error loading cached shard IDs")
-	require.Equal(t, expectedShards, cachedShards, "Finished shards are still in the cache")
+	require.Equal(t, expectedShards, cachedShards, "Finished shards are still in the cache") // This failed in a CI run. TODO: Take a look at what it does and why it fails. Maybe just extending the sleep fixes?
 
 	for ci, client := range clients {
 		client.Stop()
@@ -678,7 +678,7 @@ ProcessLoop:
 			if total == numberOfEventsToTest {
 				break ProcessLoop
 			}
-		case <-time.After(3 * time.Second):
+		case <-time.After(5 * time.Second):
 			break ProcessLoop
 		}
 	}
