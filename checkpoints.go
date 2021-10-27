@@ -120,7 +120,7 @@ func capture(
 			"attribute_not_exists(OwnerID) OR attribute_type(OwnerID, :nullType) OR LastUpdate <= :cutoff"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ConditionalCheckFailedException" {
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail {
 			// We failed to capture it
 			return nil, nil
 		}
@@ -194,7 +194,7 @@ func (cp *checkpointer) commit() (bool, error) {
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
 		// TODO: Add logging for these cases
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ConditionalCheckFailedException" && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
 
 			// TODO: investigate if not marking cp.dirty = false here causes duplicates
 
@@ -239,7 +239,7 @@ func (cp *checkpointer) release() error {
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
 		// TODO: Add logging for these cases
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ConditionalCheckFailedException" && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
 
 			// TODO: Investigate if not marking cp.captured = false here causes duplicates
 
