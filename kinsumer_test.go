@@ -168,6 +168,7 @@ func randStringBytes(n int) string {
 }
 
 func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error {
+
 	var (
 		records []*kinesis.PutRecordsRequestEntry
 		counter int64
@@ -188,12 +189,14 @@ func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error 
 			if err != nil {
 				return fmt.Errorf("Error putting records onto stream: %s", err)
 			}
+
 			failed := aws.Int64Value(pro.FailedRecordCount)
 			require.EqualValues(t, 0, failed)
 			records = nil
 		}
 	}
 	if len(records) > 0 {
+
 		pro, err := k.PutRecords(&kinesis.PutRecordsInput{
 			StreamName: streamName,
 			Records:    records,
@@ -201,6 +204,7 @@ func SpamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64) error 
 		if err != nil {
 			return fmt.Errorf("Error putting records onto stream: %s", err)
 		}
+
 		failed := aws.Int64Value(pro.FailedRecordCount)
 		require.EqualValues(t, 0, failed)
 	}
@@ -273,8 +277,8 @@ func TestKinsumer(t *testing.T) {
 	var waitGroup sync.WaitGroup
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
-	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
+	config = config.WithShardCheckFrequency(500 * time.Millisecond) // Low values here invoke our race conditions. TODO: Test fixes at various values.
+	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -328,8 +332,8 @@ func TestKinsumer(t *testing.T) {
 
 // TestLeader is an integration test of leadership claiming and deleting old clients.
 func TestLeader(t *testing.T) {
-	const (
-		numberOfEventsToTest = 4321
+	const ( // TODO: Revert these values
+		numberOfEventsToTest = 9321 // Upped to 9321 to increase chances of invoking issues with duplicates/races.
 		numberOfClients      = 2
 	)
 
@@ -349,7 +353,8 @@ func TestLeader(t *testing.T) {
 
 	clients := make([]*Kinsumer, numberOfClients)
 
-	output := make(chan int, numberOfClients)
+	// TODO: test whether buffer size actually has an effect on speed.
+	output := make(chan int, numberOfEventsToTest) // Changed from numberOfClients to numberOfEventsToTest to see if that resolves the throttling issue
 	var waitGroup sync.WaitGroup
 
 	// Put an old client that should be deleted.
@@ -370,8 +375,11 @@ func TestLeader(t *testing.T) {
 	require.NoError(t, err, "Problems putting old client")
 
 	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(5000 * time.Millisecond) // Changing from 500 -> 5000 temporarily to avoid race condition
-	config = config.WithLeaderActionFrequency(5000 * time.Millisecond)
+	config = config.WithShardCheckFrequency(500 * time.Millisecond)
+	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	// TODO: Test both with and without this.
+	//maxAge := 5000 * time.Millisecond
+	//config = config.WithClientRecordMaxAge(&maxAge)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -407,7 +415,6 @@ func TestLeader(t *testing.T) {
 
 	err = SpamStream(t, k, numberOfEventsToTest)
 	require.NoError(t, err, "Problems spamming stream with events")
-
 	readEvents(t, output, numberOfEventsToTest)
 
 	resp, err := d.GetItem(&dynamodb.GetItemInput{
@@ -426,12 +433,15 @@ func TestLeader(t *testing.T) {
 	c, err := NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
 	require.NoError(t, err, "NewWithInterfaces() failed")
 	c.clientID = "0"
+
 	err = c.Run()
 	require.NoError(t, err, "kinsumer.Run() failed")
 	require.Equal(t, true, c.isLeader, "New client is not leader")
 	_, err = clients[0].refreshShards()
 	require.NoError(t, err, "Problem refreshing shards of original leader")
+
 	require.Equal(t, false, clients[0].isLeader, "Original leader is still leader")
+
 	c.Stop()
 
 	for ci, client := range clients {
@@ -440,7 +450,9 @@ func TestLeader(t *testing.T) {
 	}
 
 	drain(t, output)
+
 	// Make sure the go routines have finished
+
 	waitGroup.Wait()
 }
 
@@ -585,6 +597,7 @@ func TestSplit(t *testing.T) {
 	waitGroup.Wait()
 }
 
+// TODO: Cleanup all the print statements.
 func drain(t *testing.T, output chan int) {
 	extraEvents := 0
 	// Drain in case events duplicated, so we don't hang.

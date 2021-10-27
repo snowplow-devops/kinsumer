@@ -34,33 +34,36 @@ type consumedRecord struct {
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple
 // clients each processing multiple shards
 type Kinsumer struct {
-	kinesis               kinesisiface.KinesisAPI   // interface to the kinesis service
-	dynamodb              dynamodbiface.DynamoDBAPI // interface to the dynamodb service
-	streamName            string                    // name of the kinesis stream to consume from
-	shardIDs              []string                  // all the shards in the stream, for detecting when the shards change
-	stop                  chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
-	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
-	records               chan *consumedRecord      // channel for the go routines to put the consumed records on
-	output                chan *consumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
-	errors                chan error                // channel used to communicate errors back to the caller
-	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
-	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
-	shardErrors           chan shardConsumerError   // all the errors found by the consumers that were not handled
-	clientsTableName      string                    // dynamo table of info about each client
-	checkpointTableName   string                    // dynamo table of the checkpoints for each shard
-	metadataTableName     string                    // dynamo table of metadata about the leader and shards
-	clientID              string                    // identifier to differentiate between the running clients
-	clientName            string                    // display name of the client - used just for debugging
-	totalClients          int                       // The number of clients that are currently working on this stream
-	thisClient            int                       // The (sorted by name) index of this client in the total list
-	config                Config                    // configuration struct
-	numberOfRuns          int32                     // Used to atomically make sure we only ever allow one Run() to be called
-	isLeader              bool                      // Whether this client is the leader
-	unbecomingLeader      bool                      // Flag to avoid race condition when unbecoming leader
-	leaderLost            chan bool                 // Channel that receives an event when the node loses leadership
-	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
-	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
-	maxAgeForLeaderRecord time.Duration             // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
+	kinesis             kinesisiface.KinesisAPI   // interface to the kinesis service
+	dynamodb            dynamodbiface.DynamoDBAPI // interface to the dynamodb service
+	streamName          string                    // name of the kinesis stream to consume from
+	shardIDs            []string                  // all the shards in the stream, for detecting when the shards change
+	stop                chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
+	stoprequest         chan bool                 // channel used internally to signal to the main go routine to stop processing
+	records             chan *consumedRecord      // channel for the go routines to put the consumed records on
+	output              chan *consumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
+	errors              chan error                // channel used to communicate errors back to the caller
+	waitGroup           sync.WaitGroup            // waitGroup to sync the consumers go routines on
+	mainWG              sync.WaitGroup            // WaitGroup for the mainLoop
+	shardErrors         chan shardConsumerError   // all the errors found by the consumers that were not handled
+	clientsTableName    string                    // dynamo table of info about each client
+	checkpointTableName string                    // dynamo table of the checkpoints for each shard
+	metadataTableName   string                    // dynamo table of metadata about the leader and shards
+	clientID            string                    // identifier to differentiate between the running clients
+	clientName          string                    // display name of the client - used just for debugging
+	totalClients        int                       // The number of clients that are currently working on this stream
+	thisClient          int                       // The (sorted by name) index of this client in the total list
+	config              Config                    // configuration struct
+	numberOfRuns        int32                     // Used to atomically make sure we only ever allow one Run() to be called
+	isLeader            bool                      // Whether this client is the leader
+	unbecomingLeader    bool                      // Flag to avoid race condition when unbecoming leader
+	restartingConsumers bool                      // Flag to indicate that we should only update the clients table while restarting consumers
+	// TODO: Figure out whether restartingConsumers and unbecomingLeader are both needed. I think the former makes the latter redundant.
+
+	leaderLost            chan bool      // Channel that receives an event when the node loses leadership
+	leaderWG              sync.WaitGroup // waitGroup for the leader loop
+	maxAgeForClientRecord time.Duration  // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
+	maxAgeForLeaderRecord time.Duration  // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
@@ -129,12 +132,15 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 func (k *Kinsumer) refreshShards() (bool, error) {
 	var shardIDs []string
 
+	// refreshStartTime is used to calculate the cutoff for client expiry, since short max ages can cause a race condition where clients expire too quickly (when the app is very slow and the cutoff is very short).
+	refreshStartTime := time.Now()
+
 	if err := registerWithClientsTable(k.dynamodb, k.clientID, k.clientName, k.clientsTableName); err != nil {
 		return false, err
 	}
 
 	//TODO: Move this out of refreshShards and into refreshClients
-	clients, err := getClients(k.dynamodb, k.clientID, k.clientsTableName, k.maxAgeForClientRecord)
+	clients, err := getClients(k.dynamodb, k.clientID, k.clientsTableName, k.maxAgeForClientRecord, refreshStartTime, k.config.shardCheckFrequency)
 	if err != nil {
 		return false, err
 	}
@@ -425,19 +431,27 @@ func (k *Kinsumer) Run() error {
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
 			case <-shardChangeTicker.C:
+				if k.restartingConsumers {
+					if err := registerWithClientsTable(k.dynamodb, k.clientID, k.clientName, k.clientsTableName); err != nil {
+						k.errors <- fmt.Errorf("error registering with clients table during consumer rebook: %s", err)
+					}
+					continue
+				}
 				changed, err := k.refreshShards()
 				if err != nil {
 					k.errors <- fmt.Errorf("error refreshing shards: %s", err)
 				} else if changed {
-					shardChangeTicker.Stop()
+					// When restartingConsumers == true, we default to not refreshing shards but keeping the clients table up to date with this client's existence.
+					k.restartingConsumers = true
+
 					k.stopConsumers()
+
 					record = nil
 					if err := k.startConsumers(); err != nil {
 						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
 					}
-					// We create a new shardChangeTicker here so that the time it takes to stop and
-					// start the consumers is not included in the wait for the next tick.
-					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)
+
+					k.restartingConsumers = false
 				}
 			}
 		}

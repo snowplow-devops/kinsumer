@@ -85,9 +85,12 @@ func deregisterFromClientsTable(db dynamodbiface.DynamoDBAPI, id, tableName stri
 }
 
 // getClients returns a sorted list of all recently-updated clients in dynamo
-func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, maxAgeForClientRecord time.Duration) (clients []clientRecord, err error) {
+func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, maxAgeForClientRecord time.Duration, referenceTime time.Time, shardCheckFrequency time.Duration) (clients []clientRecord, err error) {
 	filterExpression := "LastUpdate > :cutoff"
-	cutoff := strconv.FormatInt(time.Now().Add(-maxAgeForClientRecord).UnixNano(), 10)
+
+	// shardCheckFrequency added to cutoff to avoid race condition caused by slow clients
+	subtime := maxAgeForClientRecord + shardCheckFrequency
+	cutoff := strconv.FormatInt(referenceTime.Add(-subtime).UnixNano(), 10)
 
 	params := &dynamodb.ScanInput{
 		TableName:        aws.String(tableName),
