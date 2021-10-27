@@ -86,16 +86,14 @@ func (k *Kinsumer) becomeLeader() {
 
 // unbecomeLeader stops the leadership goroutine.
 func (k *Kinsumer) unbecomeLeader() {
+	// block until we know we're not unbecoming leader already
+	for {
+		if !k.unbecomingLeader {
+			break
+		}
+	}
 	if !k.isLeader {
 		return
-	}
-	// TODO: 1. Perform this check first for simpler instrumentation. 2. Poll k.unbecomingLeader instead of waiting for the working group?
-	if k.unbecomingLeader {
-		k.leaderWG.Wait()
-		time.Sleep(1 * time.Second) // Is this necessary?
-		if !k.isLeader {
-			return
-		}
 	}
 
 	k.unbecomingLeader = true
