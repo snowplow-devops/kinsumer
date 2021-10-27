@@ -87,10 +87,15 @@ func (k *Kinsumer) becomeLeader() {
 // unbecomeLeader stops the leadership goroutine.
 func (k *Kinsumer) unbecomeLeader() {
 	// block until we know we're not unbecoming leader already
+	iteration := 0
 	for {
-		if !k.unbecomingLeader {
+		if !k.unbecomingLeader { // TODO: does looping indefinitely like this have any negative effects? should we sleep for 50ms in the loop?
 			break
 		}
+		if iteration > 0 {
+			time.Sleep(100 * time.Millisecond) // TestLeader fails without this. TODO: Investigate why, unit test if possible.
+		}
+		iteration++
 	}
 	if !k.isLeader {
 		return
