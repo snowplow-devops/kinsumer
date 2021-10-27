@@ -31,6 +31,7 @@ type checkpointer struct {
 	finished              bool
 	finalSequenceNumber   string
 	updateSequencer       chan struct{}
+	lastUpdate            int64
 }
 
 type checkpointRecord struct {
@@ -58,6 +59,7 @@ func capture(
 	maxAgeForClientRecord time.Duration,
 	stats StatReceiver) (*checkpointer, error) {
 
+	// TODO: solve duplicate problem: If capture can grab shards as soon as maxAgeForClientRecord is reached, there are more chances for duplicates.
 	cutoff := time.Now().Add(-maxAgeForClientRecord).UnixNano()
 
 	// Grab the entry from dynamo assuming there is one
@@ -118,7 +120,7 @@ func capture(
 			"attribute_not_exists(OwnerID) OR attribute_type(OwnerID, :nullType) OR LastUpdate <= :cutoff"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ConditionalCheckFailedException" {
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail {
 			// We failed to capture it
 			return nil, nil
 		}
@@ -135,6 +137,7 @@ func capture(
 		sequenceNumber:        aws.StringValue(record.SequenceNumber),
 		maxAgeForClientRecord: maxAgeForClientRecord,
 		captured:              true,
+		lastUpdate:            record.LastUpdate,
 	}
 
 	return checkpointer, nil
@@ -190,8 +193,19 @@ func (cp *checkpointer) commit() (bool, error) {
 		ConditionExpression:       aws.String("OwnerID = :ownerID"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
+		// TODO: Add logging for these cases
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
+
+			// TODO: investigate if not marking cp.dirty = false here causes duplicates
+
+			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
+			return false, nil
+		}
+
 		return false, fmt.Errorf("error committing checkpoint: %s", err)
 	}
+
+	cp.lastUpdate = record.LastUpdate // update our internal copy of last update.
 
 	if sn != nil {
 		cp.stats.Checkpoint()
@@ -224,6 +238,14 @@ func (cp *checkpointer) release() error {
 		ConditionExpression:       aws.String("OwnerID = :ownerID"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
+		// TODO: Add logging for these cases
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
+
+			// TODO: Investigate if not marking cp.captured = false here causes duplicates
+
+			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
+			return nil
+		}
 		return fmt.Errorf("error releasing checkpoint: %s", err)
 	}
 
@@ -262,9 +284,9 @@ func (cp *checkpointer) updateFunc(sequenceNumber string) func() {
 		var once sync.Once
 		return func() {
 			once.Do(func() {
-				<-prev                    // Wait for all prior updateFuncs to be called
-				cp.update(sequenceNumber) // Actually perform the update
-				close(next)               // Allow the next updateFunc to be called
+				<-prev // Wait for all prior updateFuncs to be called
+				cp.update(sequenceNumber)
+				close(next) // Allow the next updateFunc to be called
 			})
 		}
 	}(updateSequencer, sequenceNumber, cp.updateSequencer)
