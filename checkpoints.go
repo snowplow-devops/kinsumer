@@ -198,10 +198,14 @@ func (cp *checkpointer) commit() (bool, error) {
 		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
 
 			// TODO: investigate if not marking cp.dirty = false here causes duplicates
-			cp.dirty = false // Mark as false to prevent further commit attempts without new data.
+			// cp.dirty = false // Mark as false to prevent further commit attempts without new data.
+			// Result: It seems that doing this resulted in more duplicates and more runs with duplicates. Needs a unit test if we want to be certain but didn't fix the problem.
 
 			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
-			return false, nil
+
+			// return true to stop consuming this shard, since another consumer owns it now.
+			// TODO: double check this doesn't cause us to do anything to the shard iterator.
+			return true, nil
 		}
 
 		return false, fmt.Errorf("error committing checkpoint: %s", err)

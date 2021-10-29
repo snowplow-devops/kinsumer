@@ -160,7 +160,7 @@ mainloop:
 	for {
 		// We have reached the end of the shard's data. Set Finished in dynamo and stop processing.
 		if iterator == "" && !finished {
-			checkpointer.finish(lastSeqNum)
+			checkpointer.finish(lastSeqNum) // This marks finished in DDB. As long as we don't do this, we should be fine as regards other clients on the shard.
 			finished = true
 		}
 
@@ -169,7 +169,7 @@ mainloop:
 		case <-k.stop:
 			return
 		case <-commitTicker.C:
-			finishCommitted, err := checkpointer.commit()
+			finishCommitted, err := checkpointer.commit() // if we return true for finishCommitted, does the checkpointer just stop? Are there any other implications vis a vis the iterator?
 			if err != nil {
 				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 				return
@@ -186,8 +186,10 @@ mainloop:
 		nextThrottle = time.After(k.config.throttleDelay)
 
 		if finished {
-			continue mainloop
+			continue mainloop // This continue stops us from consuming this shard further in this client. Does this resolve the checkpointer conflict problem?
 		}
+
+		// OR rather, should we just return this function when we hit the conflict???
 
 		// Get records from kinesis
 		records, next, lag, err := getRecords(k.kinesis, iterator)
