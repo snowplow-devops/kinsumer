@@ -198,6 +198,7 @@ func (cp *checkpointer) commit() (bool, error) {
 		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
 
 			// TODO: investigate if not marking cp.dirty = false here causes duplicates
+			cp.dirty = false // Mark as false to prevent further commit attempts without new data.
 
 			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
 			return false, nil
