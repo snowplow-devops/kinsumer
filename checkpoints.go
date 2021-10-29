@@ -147,6 +147,7 @@ func capture(
 // Returns true if we set Finished in dynamo because the library user finished consuming the shard.
 // Once that has happened, the checkpointer should be released and never grabbed again.
 func (cp *checkpointer) commit() (bool, error) {
+	// Idea: perhaps if commit still commits itself to DDB with no data at shardcheckFrequency/2, we resolve the ownership issues.
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 	if !cp.dirty && !cp.finished {
@@ -242,6 +243,10 @@ func (cp *checkpointer) release() error {
 		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
 
 			// TODO: Investigate if not marking cp.captured = false here causes duplicates
+
+			// TODO: Test that in CI.
+
+			// TODO: Can we just kill the checkpointer for these scenarios?
 
 			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
 			return nil
