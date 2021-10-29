@@ -32,6 +32,8 @@ type checkpointer struct {
 	finalSequenceNumber   string
 	updateSequencer       chan struct{}
 	lastUpdate            int64
+	commitIntervalCounter time.Duration
+	lastRecordPassed      time.Time
 }
 
 type checkpointRecord struct {
@@ -59,7 +61,6 @@ func capture(
 	maxAgeForClientRecord time.Duration,
 	stats StatReceiver) (*checkpointer, error) {
 
-	// TODO: solve duplicate problem: If capture can grab shards as soon as maxAgeForClientRecord is reached, there are more chances for duplicates.
 	cutoff := time.Now().Add(-maxAgeForClientRecord).UnixNano()
 
 	// Grab the entry from dynamo assuming there is one
@@ -146,12 +147,20 @@ func capture(
 // commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
 // Returns true if we set Finished in dynamo because the library user finished consuming the shard.
 // Once that has happened, the checkpointer should be released and never grabbed again.
-func (cp *checkpointer) commit() (bool, error) {
+func (cp *checkpointer) commit(commitFrequency time.Duration) (bool, error) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+
 	if !cp.dirty && !cp.finished {
-		return false, nil
+		cp.commitIntervalCounter += commitFrequency
+
+		// If we have recently passed a record to the user, don't update the table when we don't have a new sequence number
+		// If we haven't, update at a rate of maxAgeForClientRecord/2
+		if (time.Now().Sub(cp.lastRecordPassed) < cp.maxAgeForClientRecord/2) || (cp.commitIntervalCounter < cp.maxAgeForClientRecord/2) {
+			return false, nil
+		}
 	}
+	cp.commitIntervalCounter = 0 // Reset the counter if we're registering a commit
 	now := time.Now()
 
 	sn := &cp.sequenceNumber
@@ -193,12 +202,7 @@ func (cp *checkpointer) commit() (bool, error) {
 		ConditionExpression:       aws.String("OwnerID = :ownerID"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
-		// TODO: Add logging for these cases
 		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
-
-			// TODO: investigate if not marking cp.dirty = false here causes duplicates
-
-			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
 			return false, nil
 		}
 
@@ -238,12 +242,8 @@ func (cp *checkpointer) release() error {
 		ConditionExpression:       aws.String("OwnerID = :ownerID"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
-		// TODO: Add logging for these cases
 		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail && cp.lastUpdate < time.Now().Add(-cp.maxAgeForClientRecord).UnixNano() {
-
-			// TODO: Investigate if not marking cp.captured = false here causes duplicates
-
-			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
+			// If we failed conditional check, and the record has expired, assume that another client has legitimately siezed the shard.
 			return nil
 		}
 		return fmt.Errorf("error releasing checkpoint: %s", err)
