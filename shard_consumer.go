@@ -156,6 +156,9 @@ func (k *Kinsumer) consume(shardID string) {
 
 	retryCount := 0
 
+	// lastSeqToCheckp is used to check if we have more data to checkpoint before we exit
+	var lastSeqToCheckp string
+	// lastSeqNum is used to check if a batch of data is the last in the stream
 	var lastSeqNum string
 mainloop:
 	for {
@@ -170,7 +173,7 @@ mainloop:
 		case <-k.stop:
 			break mainloop
 		case <-commitTicker.C:
-			finishCommitted, err := checkpointer.commit()
+			finishCommitted, err := checkpointer.commit(k.config.commitFrequency)
 			if err != nil {
 				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 				return
@@ -226,7 +229,7 @@ mainloop:
 				for {
 					select {
 					case <-commitTicker.C:
-						finishCommitted, err := checkpointer.commit()
+						finishCommitted, err := checkpointer.commit(k.config.commitFrequency)
 						if err != nil {
 							k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 							return
@@ -241,6 +244,8 @@ mainloop:
 						checkpointer: checkpointer,
 						retrievedAt:  retrievedAt,
 					}:
+						checkpointer.lastRecordPassed = time.Now() // Mark the time so we don't retain shards when we're too slow to do so
+						lastSeqToCheckp = aws.StringValue(record.SequenceNumber)
 						break RecordLoop
 					}
 				}
@@ -255,22 +260,35 @@ mainloop:
 
 	// commit first in case the checkpointer has been updates since the last commit.
 	checkpointer.commitIntervalCounter = 0 // Reset commitIntervalCounter to avoid retaining ownership if there's no new sequence number
-	checkpointer.commit()
-
+	_, err1 := checkpointer.commit(0 * time.Millisecond)
+	if err1 != nil {
+		k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
+		return
+	}
 	// Resume commit loop for some time, ensuring that we don't retain ownership unless there's a new sequence number.
 	timeoutCounter := 0
+
+	// If we have committed the last sequence number returned to the user, just return. Otherwise, keep committing until we reach that state
+	if !checkpointer.dirty && checkpointer.sequenceNumber == lastSeqToCheckp {
+		return
+	}
 
 	for {
 		select {
 		case <-commitTicker.C:
 			timeoutCounter += int(k.config.commitFrequency)
 			checkpointer.commitIntervalCounter = 0
-			finishCommitted, err := checkpointer.commit()
+			// passing 0 to commit ensures we no longer retain the shard.
+			finishCommitted, err := checkpointer.commit(0 * time.Millisecond)
 			if err != nil {
 				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 				return
 			}
 			if finishCommitted {
+				return
+			}
+			// Once we have committed the last sequence Number we passed to the user, return.
+			if !checkpointer.dirty && checkpointer.sequenceNumber == lastSeqToCheckp {
 				return
 			}
 			if timeoutCounter >= int(k.maxAgeForClientRecord/2) {

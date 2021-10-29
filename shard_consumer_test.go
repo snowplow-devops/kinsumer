@@ -85,8 +85,10 @@ func TestForcefulOwnershipChange(t *testing.T) {
 	maxAge2 := 500 * time.Millisecond
 	config2 := config.WithClientRecordMaxAge(&maxAge2)
 
-	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config1)
-	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config2)
+	kinsumer1, err1 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config1)
+	kinsumer2, err2 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config2)
+	require.NoError(t, err1)
+	require.NoError(t, err2)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -103,33 +105,83 @@ func TestForcefulOwnershipChange(t *testing.T) {
 
 	kinsumer1ResultBeforeOwnerChange := readEventsToSlice(kinsumer1.records, 5*time.Second)
 
-	assert.Equal(t, 2000, len(kinsumer1ResultBeforeOwnerChange)) // Assert that we get 100 results
+	assert.Equal(t, 2000, len(kinsumer1ResultBeforeOwnerChange))
 
 	kinsumer2.waitGroup.Add(1) // consume will mark waitgroup as done on exit, so we add to it to avoid a panic
 	go kinsumer2.consume(shard)
 
-	time.Sleep(1500 * time.Millisecond) // Sleep for long enough that an ownership change will happen
+	// Because we retain the shard if no data is coming through, we mimic a stale client scenario by sending data but not acking
+	lastK1Record := &consumedRecord{
+		checkpointer: &checkpointer{},
+	}
+OwnerChangeLoop:
+	for {
+		spamStreamModified(t, k, 1, streamName, 9999)
+	getEventLoop:
+		select {
+		case k1record := <-kinsumer1.records: // if kinsumer1 gets it, don't ack
+			lastK1Record = k1record
+			break getEventLoop
+		case k2record := <-kinsumer2.records: // if kisumer2 gets it, ownership has changed. Ack then move on to the test.
+			k2record.checkpointer.update(aws.StringValue(k2record.record.SequenceNumber))
+			// because this may be called with no genuine record to k1, we use the k2 sequence number.
+			// this shouldn't make a difference since this commit will fail.
+			lastK1Record.checkpointer.update(aws.StringValue(k2record.record.SequenceNumber)) // Ack the last k1 record we have, to instigate behaviour we would see for that client
+			break OwnerChangeLoop
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
 
-	go spamStreamModified(t, k, 2000, streamName, 4000)
+	time.Sleep(300 * time.Millisecond)
+
+	go spamStreamModified(t, k, 1000, streamName, 5000)
 
 	resultsAfterOwnerChange := readMultipleToSlice([]chan *consumedRecord{kinsumer1.records, kinsumer2.records}, 5*time.Second)
-	kinsumer1ResultAfterOwnerChange := resultsAfterOwnerChange[0]
-	kinsumer2ResultAfterOwnerChange := resultsAfterOwnerChange[1]
+	kinsumer1ResultAfterOwnerChangePreClean := resultsAfterOwnerChange[0]
+	kinsumer2ResultAfterOwnerChangePreClean := resultsAfterOwnerChange[1]
+
+	// clean out the records we just used to instigate a change in ownership
+	kinsumer1ResultAfterOwnerChange := make([]*consumedRecord, 0)
+	for _, val := range kinsumer1ResultAfterOwnerChangePreClean {
+		if string(val.record.Data) != "9999" {
+			kinsumer1ResultAfterOwnerChange = append(kinsumer1ResultAfterOwnerChange, val)
+		}
+	}
+
+	kinsumer2ResultAfterOwnerChange := make([]*consumedRecord, 0)
+	for _, val := range kinsumer2ResultAfterOwnerChangePreClean {
+		if string(val.record.Data) != "9999" {
+			kinsumer2ResultAfterOwnerChange = append(kinsumer2ResultAfterOwnerChange, val)
+		}
+	}
 
 	/*
-			// Leaving this here but commented out since it's useful in inspecting the behaviour when something does look off.
-		investigationSlice := make([]string, 0)
-		for _, record := range kinsumer1ResultAfterOwnerChange {
-			investigationSlice = append(investigationSlice, string(record.record.Data))
+		// Leaving this here but commented out since it's useful in inspecting the behaviour when something does look off.
+		if len(resultsAfterOwnerChange) > 0 {
+			investigationSlice := make([]string, 0)
+			for _, record := range kinsumer1ResultAfterOwnerChange {
+				investigationSlice = append(investigationSlice, string(record.record.Data))
+			}
+			fmt.Println(investigationSlice)
 		}
 	*/
 
 	assert.Equal(t, 0, len(kinsumer1ResultAfterOwnerChange))
-	assert.Equal(t, 2000, len(kinsumer2ResultAfterOwnerChange))
+	assert.Equal(t, 1000, len(kinsumer2ResultAfterOwnerChange))
+
+	dupes := make([]string, 0)
+
+	for _, val1 := range kinsumer1ResultAfterOwnerChange {
+		for _, val2 := range kinsumer2ResultAfterOwnerChange {
+			if string(val1.record.Data) == string(val2.record.Data) {
+				dupes = append(dupes, string(val1.record.Data))
+			}
+		}
+	}
 
 	// Check that every expected value is present in the results
 	missingIntegers := make([]int, 0)
-	for i := 4000; i < 6000; i++ {
+	for i := 5000; i < 6000; i++ {
 		present := false
 		for _, val := range kinsumer2ResultAfterOwnerChange {
 			if string(val.record.Data) == fmt.Sprint(i) {
@@ -519,8 +571,6 @@ func TestConsumerStopStart(t *testing.T) {
 
 }
 
-// TODO: For some reason, using the readMultipleToSlice function in this test causes us to receive no data for the first two consumers. Figure out why and resolve.
-// (ideally we start to read the data first then we start to stop and consumers)
 // TestMultipleConsumerStopStart tests the same thing as TestConsumerStopStart, but for the scenario where there are multiple clients vying for control of the same shard.
 // This is a common scenario when shards are merged, because the reported shard count will change relatively slowly over time (seconds), and for a period different clients will report different shard counts
 // The aim of this test is to give us some more robust assurance that there are no additional issues for multiple consumers on a shard which aren't caught when we only have one consumer at a time.
@@ -609,7 +659,6 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 		}
 	}()
 
-	// TODO: Investigate why starting this process earlier results in an empty result set for one of the consumers.
 	results := readMultipleToSlice([]chan *consumedRecord{kinsumer1.records, kinsumer2.records, kinsumer3.records}, 10*time.Second)
 
 	kinsumer1Result := results[0]
@@ -620,8 +669,6 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 	assert.NotEqual(t, 0, len(kinsumer1Result))
 	assert.NotEqual(t, 0, len(kinsumer2Result))
 	assert.NotEqual(t, 0, len(kinsumer3Result))
-
-	fmt.Println("Lengths: ", len(kinsumer1Result), len(kinsumer2Result), len(kinsumer3Result)) // TODO: Remove this
 
 	// Check for dupes within each client's results
 	kinsumer1Dupes := getDupesFromSlice(kinsumer1Result)
