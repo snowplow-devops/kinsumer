@@ -169,12 +169,15 @@ mainloop:
 		case <-k.stop:
 			return
 		case <-commitTicker.C:
-			finishCommitted, err := checkpointer.commit() // if we return true for finishCommitted, does the checkpointer just stop? Are there any other implications vis a vis the iterator?
+			finishCommitted, ownershipRelinquished, err := checkpointer.commit() // if we return true for finishCommitted, does the checkpointer just stop? Are there any other implications vis a vis the iterator?
 			if err != nil {
 				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 				return
 			}
 			if finishCommitted {
+				return
+			}
+			if ownershipRelinquished {
 				return
 			}
 			// Go back to waiting for a throttle/stop.
@@ -227,12 +230,15 @@ mainloop:
 				for {
 					select {
 					case <-commitTicker.C:
-						finishCommitted, err := checkpointer.commit()
+						finishCommitted, ownershipRelinquished, err := checkpointer.commit()
 						if err != nil {
 							k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
 							return
 						}
 						if finishCommitted {
+							return
+						}
+						if ownershipRelinquished {
 							return
 						}
 					case <-k.stop:

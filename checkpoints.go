@@ -146,12 +146,12 @@ func capture(
 // commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
 // Returns true if we set Finished in dynamo because the library user finished consuming the shard.
 // Once that has happened, the checkpointer should be released and never grabbed again.
-func (cp *checkpointer) commit() (bool, error) {
+func (cp *checkpointer) commit() (bool, bool, error) {
 	// Idea: perhaps if commit still commits itself to DDB with no data at shardcheckFrequency/2, we resolve the ownership issues.
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 	if !cp.dirty && !cp.finished {
-		return false, nil
+		return false, false, nil
 	}
 	now := time.Now()
 
@@ -179,14 +179,14 @@ func (cp *checkpointer) commit() (bool, error) {
 
 	item, err := dynamodbattribute.MarshalMap(&record)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	attrVals, err := dynamodbattribute.MarshalMap(map[string]interface{}{
 		":ownerID": aws.String(cp.ownerID),
 	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if _, err = cp.dynamodb.PutItem(&dynamodb.PutItemInput{
 		TableName:                 aws.String(cp.tableName),
@@ -201,14 +201,16 @@ func (cp *checkpointer) commit() (bool, error) {
 			// cp.dirty = false // Mark as false to prevent further commit attempts without new data.
 			// Result: It seems that doing this resulted in more duplicates and more runs with duplicates. Needs a unit test if we want to be certain but didn't fix the problem.
 
-			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
-
 			// return true to stop consuming this shard, since another consumer owns it now.
 			// TODO: double check this doesn't cause us to do anything to the shard iterator.
-			return true, nil
+			// return true, nil
+			// Result: Worse, not better, again. :(
+
+			// If we failed conditional check, and the record has expired, assume ownership has legitimately changed, and don't return the error.
+			return false, true, nil
 		}
 
-		return false, fmt.Errorf("error committing checkpoint: %s", err)
+		return false, false, fmt.Errorf("error committing checkpoint: %s", err)
 	}
 
 	cp.lastUpdate = record.LastUpdate // update our internal copy of last update.
@@ -217,7 +219,7 @@ func (cp *checkpointer) commit() (bool, error) {
 		cp.stats.Checkpoint()
 	}
 	cp.dirty = false
-	return finished, nil
+	return finished, false, nil
 }
 
 // release releases our ownership of the checkpoint in dynamo so another client can take it
