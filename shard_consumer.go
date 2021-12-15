@@ -134,6 +134,7 @@ func (k *Kinsumer) consume(shardID string) {
 
 	// finished means we have reached the end of the shard but haven't necessarily processed/committed everything
 	finished := false
+
 	// Make sure we release the shard when we are done.
 	defer func() {
 		innerErr := checkpointer.release()
@@ -167,7 +168,7 @@ mainloop:
 		// Handle async actions, and throttle requests to keep kinesis happy
 		select {
 		case <-k.stop:
-			return
+			break mainloop
 		case <-commitTicker.C:
 			finishCommitted, err := checkpointer.commit()
 			if err != nil {
@@ -234,7 +235,7 @@ mainloop:
 							return
 						}
 					case <-k.stop:
-						return
+						break mainloop
 					case k.records <- &consumedRecord{
 						record:       record,
 						checkpointer: checkpointer,
@@ -249,5 +250,32 @@ mainloop:
 			lastSeqNum = aws.StringValue(records[len(records)-1].SequenceNumber)
 		}
 		iterator = next
+	}
+	// Handle checkpointer updates which occur after a stop request comes in (whose originating records were before)
+
+	// commit first in case the checkpointer has been updates since the last commit.
+	checkpointer.commitIntervalCounter = 0 // Reset commitIntervalCounter to avoid retaining ownership if there's no new sequence number
+	checkpointer.commit()
+
+	// Resume commit loop for some time, ensuring that we don't retain ownership unless there's a new sequence number.
+	timeoutCounter := 0
+
+	for {
+		select {
+		case <-commitTicker.C:
+			timeoutCounter += int(k.config.commitFrequency)
+			checkpointer.commitIntervalCounter = 0
+			finishCommitted, err := checkpointer.commit()
+			if err != nil {
+				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
+				return
+			}
+			if finishCommitted {
+				return
+			}
+			if timeoutCounter >= int(k.maxAgeForClientRecord/2) {
+				return
+			}
+		}
 	}
 }
