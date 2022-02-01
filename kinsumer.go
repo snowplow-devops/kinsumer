@@ -57,6 +57,7 @@ type Kinsumer struct {
 	numberOfRuns          int32                     // Used to atomically make sure we only ever allow one Run() to be called
 	isLeader              bool                      // Whether this client is the leader
 	unbecomingLeader      sync.Mutex                // Flag to avoid race condition when unbecoming leader
+	isRestartingConsumers bool                      // Flag to indicate that we should only update the clients table while restarting consumers
 	leaderLost            chan bool                 // Channel that receives an event when the node loses leadership
 	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
 	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
@@ -129,12 +130,15 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 func (k *Kinsumer) refreshShards() (bool, error) {
 	var shardIDs []string
 
+	// refreshStartTime mitigates the scenaio where long refreshes cause undue ownership conflicts
+	refreshStartTime := time.Now()
+
 	if err := registerWithClientsTable(k.dynamodb, k.clientID, k.clientName, k.clientsTableName); err != nil {
 		return false, err
 	}
 
 	//TODO: Move this out of refreshShards and into refreshClients
-	clients, err := getClients(k.dynamodb, k.clientID, k.clientsTableName, k.maxAgeForClientRecord)
+	clients, err := getClients(k.dynamodb, k.clientID, k.clientsTableName, k.maxAgeForClientRecord, refreshStartTime, k.config.shardCheckFrequency)
 	if err != nil {
 		return false, err
 	}
@@ -425,19 +429,27 @@ func (k *Kinsumer) Run() error {
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
 			case <-shardChangeTicker.C:
+				if k.isRestartingConsumers {
+					if err := registerWithClientsTable(k.dynamodb, k.clientID, k.clientName, k.clientsTableName); err != nil {
+						k.errors <- fmt.Errorf("error registering with clients table during consumer rebook: %s", err)
+					}
+					continue
+				}
 				changed, err := k.refreshShards()
 				if err != nil {
 					k.errors <- fmt.Errorf("error refreshing shards: %s", err)
 				} else if changed {
-					shardChangeTicker.Stop()
+					// If we are already restarting, don't refresh shards again, but keep updating the clients table
+					k.isRestartingConsumers = true
+
 					k.stopConsumers()
+
 					record = nil
 					if err := k.startConsumers(); err != nil {
 						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
 					}
-					// We create a new shardChangeTicker here so that the time it takes to stop and
-					// start the consumers is not included in the wait for the next tick.
-					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)
+
+					k.isRestartingConsumers = false
 				}
 			}
 		}
