@@ -253,6 +253,9 @@ mainloop:
 
 			// Update the last sequence number we saw, in case we reached the end of the stream.
 			lastSeqNum = aws.StringValue(records[len(records)-1].SequenceNumber)
+		} else {
+			// If we got no data, pause for a second to avoid hitting API limits.
+			time.Sleep(time.Duration(1 * time.Second))
 		}
 		iterator = next
 	}
