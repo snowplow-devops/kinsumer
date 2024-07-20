@@ -115,7 +115,7 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 		checkpointTableName:   applicationName + "_checkpoints",
 		clientsTableName:      applicationName + "_clients",
 		metadataTableName:     applicationName + "_metadata",
-		clientID:              uuid.New().String(),
+		clientID:              clientName, // TODO: clean up
 		clientName:            clientName,
 		config:                config,
 		maxAgeForClientRecord: *config.clientRecordMaxAge,
