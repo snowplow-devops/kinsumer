@@ -205,6 +205,19 @@ mainloop:
 				k.config.logger.Log("Got error: %s %s %sretry count is %d / %d", awsErr.Code(), awsErr.Message(), origErrStr, retryCount, maxErrorRetries)
 				// Only retry for errors that should be retried; notably, don't retry serialization errors because something bad is happening
 				shouldRetry := request.IsErrorRetryable(err) || request.IsErrorThrottle(err)
+
+				switch awsErr.Code() {
+				case kinesis.ErrCodeExpiredIteratorException:
+					newIterator, ierr := getShardIterator(k.kinesis, k.streamName, shardID, lastSeqToCheckp, nil)
+					if ierr != nil {
+						k.shardErrors <- shardConsumerError{shardID: shardID, action: "getShardIterator", err: err}
+						return
+					}
+					iterator = newIterator
+					// should retry after expired iterator is renewed successfully
+					shouldRetry = true
+				}
+
 				if shouldRetry && retryCount < maxErrorRetries {
 					retryCount++
 
