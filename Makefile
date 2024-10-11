@@ -7,11 +7,11 @@
 integration-reset: integration-down integration-up
 
 integration-up: 
-	(cd integration && docker-compose -f ./docker-compose.yml up -d)
+	(cd integration && docker compose -f ./docker-compose.yml up -d)
 	sleep 5
 
 integration-down: 
-	(cd integration && docker-compose -f ./docker-compose.yml down)
+	(cd integration && docker compose -f ./docker-compose.yml down)
 	rm -rf integration/.localstack
 
 integration: integration-up
