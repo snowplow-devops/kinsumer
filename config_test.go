@@ -64,7 +64,8 @@ func TestConfigWithMethods(t *testing.T) {
 		WithLeaderActionFrequency(1 * time.Second).
 		WithThrottleDelay(1 * time.Second).
 		WithStats(stats).
-		WithIteratorStartTimestamp(&tstamp)
+		WithIteratorStartTimestamp(&tstamp).
+		WithUseListShardsForKinesisStreamReady(true)
 
 	err := validateConfig(&config)
 	require.NoError(t, err)
@@ -76,4 +77,5 @@ func TestConfigWithMethods(t *testing.T) {
 	require.Equal(t, 1*time.Second, config.leaderActionFrequency)
 	require.Equal(t, stats, config.stats)
 	require.Equal(t, &tstamp, config.iteratorStartTimestamp)
+	require.Equal(t, true, config.useListShardsForKinesisStreamReady)
 }
