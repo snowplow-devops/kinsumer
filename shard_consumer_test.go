@@ -35,7 +35,7 @@ func TestShardConsumer(t *testing.T) {
 	config = config.WithShardCheckFrequency(500 * time.Millisecond)
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 
-	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config)
+	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -85,8 +85,8 @@ func TestForcefulOwnershipChange(t *testing.T) {
 	maxAge2 := 500 * time.Millisecond
 	config2 := config.WithClientRecordMaxAge(&maxAge2)
 
-	kinsumer1, err1 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config1)
-	kinsumer2, err2 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config2)
+	kinsumer1, err1 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config1)
+	kinsumer2, err2 := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config2)
 	require.NoError(t, err1)
 	require.NoError(t, err2)
 
@@ -227,8 +227,8 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 	maxAge2 := 500 * time.Millisecond
 	config2 := config.WithClientRecordMaxAge(&maxAge2)
 
-	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config1)
-	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config2)
+	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config1)
+	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config2)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -351,9 +351,9 @@ func TestShardsMerged(t *testing.T) {
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(100 * time.Millisecond)
 
-	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config)
-	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config)
-	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", config)
+	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
+	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -524,7 +524,7 @@ func TestConsumerStopStart(t *testing.T) {
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
 
-	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config)
+	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -596,9 +596,9 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
 
-	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config)
-	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", config)
-	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", config)
+	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
+	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -719,7 +719,7 @@ func TestDelayedUpdateDuplicates(t *testing.T) {
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
 
-	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", config)
+	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
 	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
 		StreamName: &streamName,

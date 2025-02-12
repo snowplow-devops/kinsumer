@@ -44,27 +44,27 @@ func TestNewWithInterfaces(t *testing.T) {
 	d := dynamodb.New(s)
 
 	// No kinesis
-	_, err := NewWithInterfaces(nil, d, "stream", "app", "client", NewConfig())
+	_, err := NewWithInterfaces(nil, d, "stream", "app", "client", "", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No dynamodb
-	_, err = NewWithInterfaces(k, nil, "stream", "app", "client", NewConfig())
+	_, err = NewWithInterfaces(k, nil, "stream", "app", "client", "", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No streamName
-	_, err = NewWithInterfaces(k, d, "", "app", "client", NewConfig())
+	_, err = NewWithInterfaces(k, d, "", "app", "client", "", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No applicationName
-	_, err = NewWithInterfaces(k, d, "stream", "", "client", NewConfig())
+	_, err = NewWithInterfaces(k, d, "stream", "", "client", "", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// Invalid config
-	_, err = NewWithInterfaces(k, d, "stream", "app", "client", Config{})
+	_, err = NewWithInterfaces(k, d, "stream", "app", "client", "", Config{})
 	assert.NotEqual(t, err, nil)
 
 	// All ok
-	kinsumer, err := NewWithInterfaces(k, d, "stream", "app", "client", NewConfig())
+	kinsumer, err := NewWithInterfaces(k, d, "stream", "app", "client", "", NewConfig())
 	assert.Equal(t, err, nil)
 	assert.NotEqual(t, kinsumer, nil)
 }
@@ -115,7 +115,7 @@ func setupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbifa
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, clientErr := NewWithInterfaces(k, d, streamName, *applicationName, "N/A", testConf)
+	client, clientErr := NewWithInterfaces(k, d, streamName, *applicationName, "N/A", "", testConf)
 	if clientErr != nil {
 		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
 	}
@@ -190,7 +190,7 @@ func cleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbi
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, clientErr := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	client, clientErr := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", "", testConf)
 	if clientErr != nil {
 		return fmt.Errorf("Error creating new Kinsumer Client: %s", clientErr)
 	}
@@ -332,7 +332,7 @@ func TestKinsumer(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), "", config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 
 		err = clients[i].Run()
@@ -431,7 +431,7 @@ func TestLeader(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), "", config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
@@ -475,7 +475,7 @@ func TestLeader(t *testing.T) {
 	assert.Equal(t, true, clients[0].isLeader, "First client is not leader")
 	assert.Equal(t, false, clients[1].isLeader, "Second leader is also leader")
 
-	c, err := NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
+	c, err := NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), "", config)
 	require.NoError(t, err, "NewWithInterfaces() failed")
 	c.clientID = "0"
 
@@ -537,7 +537,7 @@ func TestSplit(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_%d", i), "", config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
