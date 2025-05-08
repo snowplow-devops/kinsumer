@@ -3,16 +3,14 @@
 package mocks
 
 import (
-	"bytes"
+	"context"
+	"errors"
 	"fmt"
-	"strconv"
-	"strings"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"testing"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 )
 
 var (
@@ -20,21 +18,18 @@ var (
 	// request, then the MockDynamo will respond with nil output and
 	// mockDynamoError.
 	mockDynamoErrorTrigger = "error-trigger"
-
-	// items per page when scanning
-	mockDynamoPageSize = 5
 )
 
 func errInternalError() error {
-	return awserr.New("InternalFailure", "triggered error", nil)
+	return errors.New("triggered error")
 }
 
 func errMissingParameter(param string) error {
-	return awserr.New("MissingParameter", fmt.Sprintf("missing required parameter %s", param), nil)
+	return errors.New(fmt.Sprintf("missing required parameter %s", param))
 }
 
 func errTableNotFound(tableName string) error {
-	return awserr.New("ResourceNotFoundException", fmt.Sprintf("table %q not found", tableName), nil)
+	return errors.New(fmt.Sprintf("table %q not found", tableName))
 }
 
 // Record of a call to MockDynamo. Stores a string name of the API endpoint
@@ -54,7 +49,7 @@ type mockDynamoCallRecord struct {
 // they must be of the form <column> <operator> :<value>, and operator must be
 // =, <, <=, >, >=, or <>.
 type MockDynamo struct {
-	dynamodbiface.DynamoDBAPI
+	kinsumeriface.DynamoDBAPI
 
 	// Stored data
 	tables map[string][]mockDynamoItem
@@ -64,7 +59,7 @@ type MockDynamo struct {
 }
 
 // NewMockDynamo gets a dynamo interface for testing
-func NewMockDynamo(tables []string) dynamodbiface.DynamoDBAPI {
+func NewMockDynamo(tables []string) kinsumeriface.DynamoDBAPI {
 	d := &MockDynamo{
 		tables:   make(map[string][]mockDynamoItem),
 		requests: make([]mockDynamoCallRecord, 0),
@@ -89,7 +84,7 @@ func (d *MockDynamo) recordCall(operation string, in, out interface{}, err error
 }
 
 // PutItem mocks the dynamo PutItem method
-func (d *MockDynamo) PutItem(in *dynamodb.PutItemInput) (out *dynamodb.PutItemOutput, err error) {
+func (d *MockDynamo) PutItem(ctx context.Context, in *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (out *dynamodb.PutItemOutput, err error) {
 	defer d.recordCall("PutItem", in, out, err)
 	if in.TableName == nil {
 		return nil, errMissingParameter("TableName")
@@ -98,11 +93,11 @@ func (d *MockDynamo) PutItem(in *dynamodb.PutItemInput) (out *dynamodb.PutItemOu
 		return nil, errMissingParameter("Item")
 	}
 
-	if aws.StringValue(in.TableName) == mockDynamoErrorTrigger {
+	if aws.ToString(in.TableName) == mockDynamoErrorTrigger {
 		return nil, errInternalError()
 	}
 
-	tableName := aws.StringValue(in.TableName)
+	tableName := aws.ToString(in.TableName)
 	if _, ok := d.tables[tableName]; !ok {
 		return nil, errTableNotFound(tableName)
 	}
@@ -112,7 +107,7 @@ func (d *MockDynamo) PutItem(in *dynamodb.PutItemInput) (out *dynamodb.PutItemOu
 }
 
 // UpdateItem mocks the dynamo UpdateItem method
-func (d *MockDynamo) UpdateItem(in *dynamodb.UpdateItemInput) (out *dynamodb.UpdateItemOutput, err error) {
+func (d *MockDynamo) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (out *dynamodb.UpdateItemOutput, err error) {
 	defer d.recordCall("UpdateItem", in, out, err)
 	if in.TableName == nil {
 		return nil, errMissingParameter("TableName")
@@ -125,7 +120,7 @@ func (d *MockDynamo) UpdateItem(in *dynamodb.UpdateItemInput) (out *dynamodb.Upd
 }
 
 // GetItem mocks the dynamo GetItem method
-func (d *MockDynamo) GetItem(in *dynamodb.GetItemInput) (out *dynamodb.GetItemOutput, err error) {
+func (d *MockDynamo) GetItem(ctx context.Context, in *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (out *dynamodb.GetItemOutput, err error) {
 	defer d.recordCall("GetItem", in, out, err)
 
 	if in.TableName == nil {
@@ -134,11 +129,11 @@ func (d *MockDynamo) GetItem(in *dynamodb.GetItemInput) (out *dynamodb.GetItemOu
 	if in.Key == nil {
 		return nil, errMissingParameter("Key")
 	}
-	if aws.StringValue(in.TableName) == mockDynamoErrorTrigger {
+	if aws.ToString(in.TableName) == mockDynamoErrorTrigger {
 		return nil, errInternalError()
 	}
 
-	tableName := aws.StringValue(in.TableName)
+	tableName := aws.ToString(in.TableName)
 	if _, ok := d.tables[tableName]; !ok {
 		return nil, errTableNotFound(tableName)
 	}
@@ -147,12 +142,12 @@ func (d *MockDynamo) GetItem(in *dynamodb.GetItemInput) (out *dynamodb.GetItemOu
 	for col, operand := range in.Key {
 		filters = append(filters, dynamoFilter{
 			col:     col,
-			comp:    attrEqual,
+			comp:    attrEq,
 			operand: operand,
 		})
 	}
 
-	var match map[string]*dynamodb.AttributeValue
+	var match map[string]types.AttributeValue
 ItemLoop:
 	for _, item := range d.tables[tableName] {
 		for _, filter := range filters {
@@ -167,289 +162,28 @@ ItemLoop:
 	return &dynamodb.GetItemOutput{Item: match}, nil
 }
 
-// ScanPages mocks the dynamo ScanPages method
-func (d *MockDynamo) ScanPages(in *dynamodb.ScanInput, pager func(*dynamodb.ScanOutput, bool) bool) (err error) {
-	defer d.recordCall("ScanPages", in, nil, err)
+type mockDynamoItem map[string]types.AttributeValue
 
-	if in.TableName == nil {
-		return errMissingParameter("TableName")
-	}
-	if aws.StringValue(in.TableName) == mockDynamoErrorTrigger {
-		return errInternalError()
-	}
-
-	filter, err := parseFilter(aws.StringValue(in.FilterExpression), in.ExpressionAttributeValues)
-	if err != nil {
-		return err
-	}
-
-	table, ok := d.tables[aws.StringValue(in.TableName)]
-	if !ok {
-		return errTableNotFound(aws.StringValue(in.TableName))
-	}
-
-	var items []mockDynamoItem
-	for _, item := range table {
-		if item.applyFilter(filter) {
-			items = append(items, item)
-		}
-	}
-
-	var pages []*dynamodb.ScanOutput
-	for i := 0; i < len(items); i += mockDynamoPageSize {
-		end := i + mockDynamoPageSize
-		if end > len(items) {
-			end = len(items)
-		}
-		pageItems := make([]map[string]*dynamodb.AttributeValue, end-i)
-		for j := range pageItems {
-			pageItems[j] = (map[string]*dynamodb.AttributeValue)(items[i+j])
-		}
-
-		page := &dynamodb.ScanOutput{
-			Count: aws.Int64(int64(end - i)),
-			Items: pageItems,
-		}
-		pages = append(pages, page)
-	}
-
-	for i, p := range pages {
-		if !pager(p, i == len(pages)-1) {
-			break
-		}
-	}
-	return nil
+func attrEq(l, r types.AttributeValue) bool {
+	return attributeValueEqualS(l, r) || attributeValueEqualN(l, r)
 }
 
-type mockDynamoItem map[string]*dynamodb.AttributeValue
-
-type attrType int
-
-const (
-	unknownAttr attrType = iota
-	binaryAttr
-	boolAttr
-	binarySetAttr
-	listAttr
-	mapAttr
-	numberAttr
-	numberSetAttr
-	nullAttr
-	stringAttr
-	stringSetAttr
-)
-
-func typeOfAttr(v *dynamodb.AttributeValue) attrType {
-	switch {
-	case v.B != nil:
-		return binaryAttr
-	case v.BOOL != nil:
-		return boolAttr
-	case v.BS != nil:
-		return binarySetAttr
-	case v.L != nil:
-		return listAttr
-	case v.M != nil:
-		return mapAttr
-	case v.N != nil:
-		return numberAttr
-	case v.NS != nil:
-		return numberSetAttr
-	case v.NULL != nil:
-		return nullAttr
-	case v.S != nil:
-		return stringAttr
-	case v.SS != nil:
-		return stringSetAttr
-	default:
-		return unknownAttr
-	}
+func attributeValueEqualS(l, r types.AttributeValue) bool {
+	l1, ok1 := l.(*types.AttributeValueMemberS)
+	r1, ok2 := r.(*types.AttributeValueMemberS)
+	return ok1 && ok2 && (*l1).Value == (*r1).Value
 }
 
-func attrEqual(l, r *dynamodb.AttributeValue) bool {
-	if typeOfAttr(l) != typeOfAttr(r) {
-		return false
-	}
-
-	// value equality
-	if !bytes.Equal(l.B, r.B) ||
-		aws.BoolValue(l.BOOL) != aws.BoolValue(r.BOOL) ||
-		aws.BoolValue(l.NULL) != aws.BoolValue(r.NULL) ||
-		parseNum(l.N) != parseNum(r.N) ||
-		aws.StringValue(l.S) != aws.StringValue(r.S) {
-		return false
-	}
-
-	// list equality
-	if l.L != nil {
-		if len(l.L) != len(r.L) {
-			return false
-		}
-		for i, lv := range l.L {
-			if !attrEqual(lv, r.L[i]) {
-				return false
-			}
-		}
-	}
-
-	// map equality
-	if l.M != nil {
-		if len(l.M) != len(r.M) {
-			return false
-		}
-		for k, lv := range l.M {
-			if !attrEqual(lv, r.M[k]) {
-				return false
-			}
-		}
-	}
-
-	// binary set equality
-	if l.BS != nil {
-		if len(l.BS) != len(r.BS) {
-			return false
-		}
-		lSet := make(map[string]struct{})
-		for _, k := range l.BS {
-			lSet[string(k)] = struct{}{}
-		}
-		for _, k := range r.BS {
-			if _, ok := lSet[string(k)]; !ok {
-				return false
-			}
-		}
-	}
-
-	// number set equality
-	if l.NS != nil {
-		if len(l.NS) != len(r.NS) {
-			return false
-		}
-		lSet := make(map[float64]struct{})
-		for _, k := range l.NS {
-			lSet[parseNum(k)] = struct{}{}
-		}
-		for _, k := range r.NS {
-			if _, ok := lSet[parseNum(k)]; !ok {
-				return false
-			}
-		}
-	}
-
-	// string set equality
-	if l.SS != nil {
-		if len(l.SS) != len(r.SS) {
-			return false
-		}
-		lSet := make(map[string]struct{})
-		for _, k := range l.SS {
-			lSet[aws.StringValue(k)] = struct{}{}
-		}
-		for _, k := range r.SS {
-			if _, ok := lSet[aws.StringValue(k)]; !ok {
-				return false
-			}
-		}
-	}
-
-	return true
-}
-
-func attrNotEqual(l, r *dynamodb.AttributeValue) bool {
-	return !attrEqual(l, r)
-}
-
-func attrLessThan(l, r *dynamodb.AttributeValue) bool {
-	if typeOfAttr(l) != typeOfAttr(r) {
-		return false
-	}
-
-	switch typeOfAttr(l) {
-	case stringAttr:
-		return aws.StringValue(l.S) < aws.StringValue(r.S)
-	case numberAttr:
-		return parseNum(l.N) < parseNum(r.N)
-	default:
-		return false
-	}
-}
-
-func attrGreaterThan(l, r *dynamodb.AttributeValue) bool {
-	return attrLessThan(r, l)
-}
-
-func attrLessThanOrEqual(l, r *dynamodb.AttributeValue) bool {
-	return !attrLessThan(r, l)
-}
-
-func attrGreaterThanOrEqual(l, r *dynamodb.AttributeValue) bool {
-	return !attrLessThan(l, r)
-}
-
-func parseNum(raw *string) float64 {
-	if raw == nil {
-		return 0
-	}
-	n, err := strconv.ParseFloat(*raw, 64)
-	if err != nil {
-		panic(err)
-	}
-	return n
+func attributeValueEqualN(l, r types.AttributeValue) bool {
+	l1, ok1 := l.(*types.AttributeValueMemberN)
+	r1, ok2 := r.(*types.AttributeValueMemberN)
+	return ok1 && ok2 && (*l1).Value == (*r1).Value
 }
 
 type dynamoFilter struct {
 	col     string
-	comp    func(l, r *dynamodb.AttributeValue) bool
-	operand *dynamodb.AttributeValue
-}
-
-// Parse a filter expression. Compound filter expressions with multiple
-// conditions aren't supported. Only filters that look like
-// 'column <comparator> :value' work.
-func parseFilter(expr string, attrs map[string]*dynamodb.AttributeValue) (dynamoFilter, error) {
-	out := dynamoFilter{}
-	if len(expr) == 0 {
-		out.comp = func(_, _ *dynamodb.AttributeValue) bool { return true }
-		return out, nil
-	}
-
-	// parse out column
-	splitExpr := strings.Split(expr, " ")
-	if len(splitExpr) != 3 {
-		return out, fmt.Errorf("unparseable filter, expected 'column cmp :val'. expr=%q", expr)
-	}
-
-	var rawComp, rawVal string
-	out.col, rawComp, rawVal = splitExpr[0], splitExpr[1], splitExpr[2]
-
-	// parse comparator
-	switch rawComp {
-	case "=":
-		out.comp = attrEqual
-	case "<>":
-		out.comp = attrNotEqual
-	case "<":
-		out.comp = attrLessThan
-	case "<=":
-		out.comp = attrLessThanOrEqual
-	case ">":
-		out.comp = attrGreaterThan
-	case ">=":
-		out.comp = attrGreaterThanOrEqual
-	default:
-		return out, fmt.Errorf("unknown comparator %q", rawComp)
-	}
-
-	// parse operand
-	if !strings.HasPrefix(rawVal, ":") {
-		return out, fmt.Errorf("unparseable filter, expected 'column cmp :val' style. expr=%q", expr)
-	}
-	var ok bool
-	out.operand, ok = attrs[rawVal]
-	if !ok {
-		return out, fmt.Errorf("missing filter argument %q", rawVal)
-	}
-	return out, nil
+	comp    func(l, r types.AttributeValue) bool
+	operand types.AttributeValue
 }
 
 func (i mockDynamoItem) applyFilter(f dynamoFilter) bool {
@@ -463,12 +197,7 @@ func (i mockDynamoItem) applyFilter(f dynamoFilter) bool {
 		return false
 	}
 
-	if typeOfAttr(itemVal) != typeOfAttr(f.operand) {
-		return false
-	}
-
 	return f.comp(itemVal, f.operand)
-
 }
 
 // AssertNoRequestsMade will Execute a function, asserting that no requests

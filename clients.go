@@ -5,14 +5,16 @@ package kinsumer
 //TODO: The filename is bad
 
 import (
+	"context"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"sort"
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 const clientReapAge = 48 * time.Hour
@@ -42,9 +44,9 @@ func (sc sortableClients) Swap(left, right int) {
 }
 
 // registerWithClientsTable adds or updates our client with a current LastUpdate in dynamo
-func registerWithClientsTable(db dynamodbiface.DynamoDBAPI, id, name, tableName string) error {
+func registerWithClientsTable(db kinsumeriface.DynamoDBAPI, id, name, tableName string) error {
 	now := time.Now()
-	item, err := dynamodbattribute.MarshalMap(clientRecord{
+	item, err := attributevalue.MarshalMap(clientRecord{
 		ID:            id,
 		Name:          name,
 		LastUpdate:    now.UnixNano(),
@@ -55,7 +57,7 @@ func registerWithClientsTable(db dynamodbiface.DynamoDBAPI, id, name, tableName 
 		return err
 	}
 
-	if _, err = db.PutItem(&dynamodb.PutItemInput{
+	if _, err = db.PutItem(context.TODO(), &dynamodb.PutItemInput{
 		TableName: aws.String(tableName),
 		Item:      item,
 	}); err != nil {
@@ -66,15 +68,15 @@ func registerWithClientsTable(db dynamodbiface.DynamoDBAPI, id, name, tableName 
 }
 
 // deregisterWithClientsTable deletes our client from dynamo
-func deregisterFromClientsTable(db dynamodbiface.DynamoDBAPI, id, tableName string) error {
+func deregisterFromClientsTable(db kinsumeriface.DynamoDBAPI, id, tableName string) error {
 	idStruct := struct{ ID string }{ID: id}
-	item, err := dynamodbattribute.MarshalMap(idStruct)
+	item, err := attributevalue.MarshalMap(idStruct)
 
 	if err != nil {
 		return err
 	}
 
-	if _, err = db.DeleteItem(&dynamodb.DeleteItemInput{
+	if _, err = db.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
 		TableName: aws.String(tableName),
 		Key:       item,
 	}); err != nil {
@@ -85,7 +87,7 @@ func deregisterFromClientsTable(db dynamodbiface.DynamoDBAPI, id, tableName stri
 }
 
 // getClients returns a sorted list of all recently-updated clients in dynamo
-func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, maxAgeForClientRecord time.Duration, referenceTime time.Time, shardCheckFrequency time.Duration) (clients []clientRecord, err error) {
+func getClients(db kinsumeriface.DynamoDBAPI, name string, tableName string, maxAgeForClientRecord time.Duration, referenceTime time.Time, shardCheckFrequency time.Duration) (clients []clientRecord, err error) {
 	filterExpression := "LastUpdate > :cutoff"
 
 	// shardCheckFrequency added to cutoff to avoid race condition caused by slow clients
@@ -96,31 +98,26 @@ func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, max
 		TableName:        aws.String(tableName),
 		ConsistentRead:   aws.Bool(true),
 		FilterExpression: aws.String(filterExpression),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":cutoff": {N: &cutoff},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":cutoff": &types.AttributeValueMemberN{Value: cutoff},
 		},
 	}
 
-	var innerError error
-	err = db.ScanPages(params, func(p *dynamodb.ScanOutput, lastPage bool) (shouldContinue bool) {
-		for _, item := range p.Items {
-			var record clientRecord
-			innerError = dynamodbattribute.UnmarshalMap(item, &record)
-			if innerError != nil {
-				return false
-			}
-			clients = append(clients, record)
+	paginator := dynamodb.NewScanPaginator(db, params)
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.TODO())
+		if err != nil {
+			return nil, err
 		}
 
-		return !lastPage
-	})
+		var records []clientRecord
 
-	if innerError != nil {
-		return nil, innerError
-	}
-
-	if err != nil {
-		return nil, err
+		err = attributevalue.UnmarshalListOfMaps(page.Items, &records)
+		if err != nil {
+			return nil, err
+		}
+		clients = append(clients, records...)
 	}
 
 	sort.Sort(sortableClients(clients))
@@ -128,7 +125,7 @@ func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, max
 }
 
 // reapClients deletes any sufficiently old clients from dynamo
-func reapClients(db dynamodbiface.DynamoDBAPI, tableName string) error {
+func reapClients(db kinsumeriface.DynamoDBAPI, tableName string) error {
 	filterExpression := "LastUpdate < :cutoff"
 	cutoff := strconv.FormatInt(time.Now().Add(-clientReapAge).UnixNano(), 10)
 
@@ -136,46 +133,41 @@ func reapClients(db dynamodbiface.DynamoDBAPI, tableName string) error {
 		TableName:        aws.String(tableName),
 		ConsistentRead:   aws.Bool(true),
 		FilterExpression: aws.String(filterExpression),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":cutoff": {N: &cutoff},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":cutoff": &types.AttributeValueMemberN{Value: cutoff},
 		},
 	}
 
 	var clients []clientRecord
-	var innerError error
-	err := db.ScanPages(params, func(p *dynamodb.ScanOutput, lastPage bool) (shouldContinue bool) {
-		for _, item := range p.Items {
-			var record clientRecord
-			innerError = dynamodbattribute.UnmarshalMap(item, &record)
-			if innerError != nil {
-				return false
-			}
-			clients = append(clients, record)
+	paginator := dynamodb.NewScanPaginator(db, params)
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.TODO())
+		if err != nil {
+			return err
 		}
 
-		return !lastPage
-	})
+		var records []clientRecord
 
-	if innerError != nil {
-		return innerError
-	}
-
-	if err != nil {
-		return err
+		err = attributevalue.UnmarshalListOfMaps(page.Items, &records)
+		if err != nil {
+			return err
+		}
+		clients = append(clients, records...)
 	}
 
 	for _, client := range clients {
 		idStruct := struct{ ID string }{ID: client.ID}
-		item, err := dynamodbattribute.MarshalMap(idStruct)
+		item, err := attributevalue.MarshalMap(idStruct)
 		if err != nil {
 			return err
 		}
-		if _, err = db.DeleteItem(&dynamodb.DeleteItemInput{
+		if _, err = db.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
 			TableName:           aws.String(tableName),
 			Key:                 item,
 			ConditionExpression: aws.String(filterExpression),
-			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-				":cutoff": {N: &cutoff},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":cutoff": &types.AttributeValueMemberN{Value: cutoff},
 			},
 		}); err != nil {
 			return err

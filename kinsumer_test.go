@@ -2,8 +2,10 @@
 package kinsumer
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -11,40 +13,38 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	awsRegion             = flag.String("region", "us-west-2", "Region to run tests in")
-	dynamoEndpoint        = flag.String("dynamo_endpoint", "http://localhost:4566", "Endpoint for dynamo test server")
-	kinesisEndpoint       = flag.String("kinesis_endpoint", "http://localhost:4568", "Endpoint for kinesis test server")
+	awsRegion             = flag.String("region", "eu-central-1", "Region to run tests in")
+	customEndpoint        = flag.String("custom_endpoint", "http://localhost:4566", "Endpoint for custom AWS test server")
 	resourceChangeTimeout = flag.Duration("resource_change_timeout", 50*time.Millisecond, "Timeout between changes to the resource infrastructure")
 	applicationName       = flag.String("application_name", "kinsumer_test", "Name of the application, will impact dynamo table names")
 )
 
 const (
-	shardCount int64 = 10
-	shardLimit int64 = 100
+	shardCount int32 = 10
+	shardLimit int32 = 100
 )
 
 func TestNewWithInterfaces(t *testing.T) {
-	s := session.Must(session.NewSession())
-	k := kinesis.New(s)
-	d := dynamodb.New(s)
+	cfg, err := config.LoadDefaultConfig(t.Context())
+	k := kinesis.NewFromConfig(cfg)
+	d := dynamodb.NewFromConfig(cfg)
 
 	// No kinesis
-	_, err := NewWithInterfaces(nil, d, "stream", "app", "client", "", NewConfig())
+	_, err = NewWithInterfaces(nil, d, "stream", "app", "client", "", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No dynamodb
@@ -69,46 +69,62 @@ func TestNewWithInterfaces(t *testing.T) {
 	assert.NotEqual(t, kinsumer, nil)
 }
 
-func createFreshStream(t *testing.T, k kinesisiface.KinesisAPI, streamName string, shardCount int64) error {
-	_, err := k.DeleteStream(&kinesis.DeleteStreamInput{
-		StreamName: &streamName,
-	})
+func createFreshStream(t *testing.T, k kinsumeriface.KinesisAPI, streamName string, shardCount int32) error {
+	exists, err := streamExists(t, k, streamName)
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
-			if awsErr.Code() != "ResourceNotFoundException" {
-				return err
-			}
+		return err
+	}
+
+	if exists {
+		_, err = k.DeleteStream(t.Context(), &kinesis.DeleteStreamInput{
+			StreamName: &streamName,
+		})
+		if err != nil {
+			return err
 		}
-	} else {
-		// Wait for the stream to be deleted
+
 		time.Sleep(*resourceChangeTimeout)
 	}
 
-	_, err = k.CreateStream(&kinesis.CreateStreamInput{
-		ShardCount: aws.Int64(shardCount),
-		StreamName: &streamName,
+	_, err = k.CreateStream(t.Context(), &kinesis.CreateStreamInput{
+		ShardCount: aws.Int32(shardCount),
+		StreamName: aws.String(streamName),
 	})
 
 	if err != nil {
 		return err
 	}
 	for {
-		res, err1 := k.DescribeStream(&kinesis.DescribeStreamInput{
+		res, err1 := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 			StreamName: aws.String(streamName),
 		})
 		if err1 != nil {
 			return err1
 		}
 
-		if *res.StreamDescription.StreamStatus == "ACTIVE" {
+		if res.StreamDescription.StreamStatus == "ACTIVE" {
 			return nil
 		}
 	}
 }
 
+func streamExists(t *testing.T, client kinsumeriface.KinesisAPI, streamName string) (bool, error) {
+	_, err := client.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+		StreamName: aws.String(streamName),
+	})
+	if err != nil {
+		var rnfe *ktypes.ResourceNotFoundException
+		if errors.As(err, &rnfe) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // TODO: factor out the setup to a utils package for a cleaner instrumentation?
 // TODO: Add tests for our customisations in this fork
-func setupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI, streamName string, shardCount int64) error {
+func setupTestEnvironment(t *testing.T, k kinsumeriface.KinesisAPI, d kinsumeriface.DynamoDBAPI, streamName string, shardCount int32) error {
 	err := createFreshStream(t, k, streamName, shardCount)
 	if err != nil {
 		return fmt.Errorf("Error creating fresh stream: %s", err)
@@ -132,34 +148,34 @@ func setupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbifa
 
 	// block until all three tables have been created
 	for {
-		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.checkpointTableName})
+		res, err1 := d.DescribeTable(t.Context(), &dynamodb.DescribeTableInput{TableName: &client.checkpointTableName})
 		if err1 != nil {
 			return err1
 		}
 
-		if *res.Table.TableStatus == "ACTIVE" {
+		if res.Table.TableStatus == "ACTIVE" {
 			break
 		}
 	}
 
 	for {
-		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.clientsTableName})
+		res, err1 := d.DescribeTable(t.Context(), &dynamodb.DescribeTableInput{TableName: &client.clientsTableName})
 		if err1 != nil {
 			return err1
 		}
 
-		if *res.Table.TableStatus == "ACTIVE" {
+		if res.Table.TableStatus == "ACTIVE" {
 			break
 		}
 	}
 
 	for {
-		res, err1 := d.DescribeTable(&dynamodb.DescribeTableInput{TableName: &client.metadataTableName})
+		res, err1 := d.DescribeTable(t.Context(), &dynamodb.DescribeTableInput{TableName: &client.metadataTableName})
 		if err1 != nil {
 			return err1
 		}
 
-		if *res.Table.TableStatus == "ACTIVE" {
+		if res.Table.TableStatus == "ACTIVE" {
 			return nil
 		}
 	}
@@ -168,10 +184,9 @@ func setupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbifa
 
 func ignoreResourceNotFound(err error) error {
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
-			if awsErr.Code() != "ResourceNotFoundException" {
-				return err
-			}
+		var rnfe *ktypes.ResourceNotFoundException
+		if !errors.As(err, &rnfe) {
+			return err
 		}
 	} else {
 		time.Sleep(*resourceChangeTimeout)
@@ -180,8 +195,8 @@ func ignoreResourceNotFound(err error) error {
 	return nil
 }
 
-func cleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI, streamName string) error {
-	_, err := k.DeleteStream(&kinesis.DeleteStreamInput{
+func cleanupTestEnvironment(t *testing.T, k kinsumeriface.KinesisAPI, d kinsumeriface.DynamoDBAPI, streamName string) error {
+	_, err := k.DeleteStream(t.Context(), &kinesis.DeleteStreamInput{
 		StreamName: &streamName,
 	})
 
@@ -212,21 +227,21 @@ func randStringBytes(n int) string {
 	return string(b)
 }
 
-func spamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64, streamName string) error {
+func spamStream(t *testing.T, k kinsumeriface.KinesisAPI, numEvents int64, streamName string) error {
 
 	var (
-		records []*kinesis.PutRecordsRequestEntry
+		records []ktypes.PutRecordsRequestEntry
 		counter int64
 	)
 
 	for counter = 0; counter < numEvents; counter++ {
-		records = append(records, &kinesis.PutRecordsRequestEntry{
+		records = append(records, ktypes.PutRecordsRequestEntry{
 			Data:         []byte(strconv.FormatInt(counter, 10)),
 			PartitionKey: aws.String(randStringBytes(10)),
 		})
 
 		if len(records) == 100 {
-			pro, err := k.PutRecords(&kinesis.PutRecordsInput{
+			pro, err := k.PutRecords(t.Context(), &kinesis.PutRecordsInput{
 				StreamName: &streamName,
 				Records:    records,
 			})
@@ -235,14 +250,14 @@ func spamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64, stream
 				return fmt.Errorf("Error putting records onto stream: %s", err)
 			}
 
-			failed := aws.Int64Value(pro.FailedRecordCount)
+			failed := aws.ToInt32(pro.FailedRecordCount)
 			require.EqualValues(t, 0, failed)
 			records = nil
 		}
 	}
 	if len(records) > 0 {
 
-		pro, err := k.PutRecords(&kinesis.PutRecordsInput{
+		pro, err := k.PutRecords(t.Context(), &kinesis.PutRecordsInput{
 			StreamName: &streamName,
 			Records:    records,
 		})
@@ -250,27 +265,23 @@ func spamStream(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64, stream
 			return fmt.Errorf("Error putting records onto stream: %s", err)
 		}
 
-		failed := aws.Int64Value(pro.FailedRecordCount)
+		failed := aws.ToInt32(pro.FailedRecordCount)
 		require.EqualValues(t, 0, failed)
 	}
 
 	return nil
 }
 
-func kinesisAndDynamoInstances() (kinesisiface.KinesisAPI, dynamodbiface.DynamoDBAPI) {
-	kc := aws.NewConfig().WithRegion(*awsRegion).WithCredentials(credentials.NewStaticCredentials("foo", "var", "")).WithLogLevel(3)
-	if len(*kinesisEndpoint) > 0 {
-		kc = kc.WithEndpoint(*kinesisEndpoint)
-	}
+func kinesisAndDynamoInstances(t *testing.T) (kinsumeriface.KinesisAPI, kinsumeriface.DynamoDBAPI) {
+	cfg, err := config.LoadDefaultConfig(t.Context(),
+		config.WithRegion(*awsRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("foo", "var", "")),
+		config.WithBaseEndpoint(*customEndpoint),
+	)
+	require.NoError(t, err, "Loading config failed")
 
-	dc := aws.NewConfig().WithRegion(*awsRegion).WithCredentials(credentials.NewStaticCredentials("foo", "var", "")).WithLogLevel(3)
-	if len(*dynamoEndpoint) > 0 {
-		dc = dc.WithEndpoint(*dynamoEndpoint)
-	}
-
-	k := kinesis.New(session.Must(session.NewSession(kc)))
-	d := dynamodb.New(session.Must(session.NewSession(dc)))
-
+	k := kinesis.NewFromConfig(cfg)
+	d := dynamodb.NewFromConfig(cfg)
 	return k, d
 }
 
@@ -279,7 +290,7 @@ func testSetup(t *testing.T) {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := kinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, d, "testSetupStream")
@@ -306,7 +317,7 @@ func TestKinsumer(t *testing.T) {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := kinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, d, streamName)
@@ -389,7 +400,7 @@ func TestLeader(t *testing.T) {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := kinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, d, streamName)
@@ -406,7 +417,7 @@ func TestLeader(t *testing.T) {
 
 	// Put an old client that should be deleted.
 	now := time.Now().Add(-time.Hour * 24 * 7)
-	item, err := dynamodbattribute.MarshalMap(clientRecord{
+	item, err := attributevalue.MarshalMap(clientRecord{
 		ID:            "Old",
 		Name:          "Old",
 		LastUpdate:    now.UnixNano(),
@@ -415,7 +426,7 @@ func TestLeader(t *testing.T) {
 	require.NoError(t, err, "Problems converting old client")
 
 	clientsTableName := aws.String(*applicationName + "_clients")
-	_, err = d.PutItem(&dynamodb.PutItemInput{
+	_, err = d.PutItem(t.Context(), &dynamodb.PutItemInput{
 		TableName: clientsTableName,
 		Item:      item,
 	})
@@ -462,11 +473,11 @@ func TestLeader(t *testing.T) {
 	require.NoError(t, err, "Problems spamming stream with events")
 	readEvents(t, output, numberOfEventsToTest)
 
-	resp, err := d.GetItem(&dynamodb.GetItemInput{
+	resp, err := d.GetItem(t.Context(), &dynamodb.GetItemInput{
 		TableName:      clientsTableName,
 		ConsistentRead: aws.Bool(true),
-		Key: map[string]*dynamodb.AttributeValue{
-			"ID": {S: aws.String("Old")},
+		Key: map[string]dbtypes.AttributeValue{
+			"ID": &dbtypes.AttributeValueMemberS{Value: "Old"},
 		},
 	})
 	require.NoError(t, err, "Problem getting old client")
@@ -512,7 +523,7 @@ func TestSplit(t *testing.T) {
 		t.Skip("skipping test in short mode.")
 	}
 
-	k, d := kinesisAndDynamoInstances()
+	k, d := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, d, streamName)
@@ -569,20 +580,20 @@ func TestSplit(t *testing.T) {
 
 	readEvents(t, output, numberOfEventsToTest)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shards := desc.StreamDescription.Shards
-	shardMap := make(map[string]*kinesis.Shard)
+	shardMap := make(map[string]*ktypes.Shard)
 	for _, shard := range shards {
-		shardMap[*shard.ShardId] = shard
+		shardMap[*shard.ShardId] = &shard
 	}
 
 	require.True(t, len(shards) >= 2, "Fewer than 2 shards")
 
-	_, err = k.MergeShards(&kinesis.MergeShardsInput{
+	_, err = k.MergeShards(t.Context(), &kinesis.MergeShardsInput{
 		StreamName:           &streamName,
 		ShardToMerge:         aws.String(*shards[0].ShardId),
 		AdjacentShardToMerge: aws.String(*shards[1].ShardId),
@@ -592,12 +603,12 @@ func TestSplit(t *testing.T) {
 	require.True(t, shardCount <= shardLimit, "Too many shards")
 	timeout := time.After(time.Second)
 	for {
-		desc, err = k.DescribeStream(&kinesis.DescribeStreamInput{
+		desc, err = k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 			StreamName: &streamName,
-			Limit:      aws.Int64(shardLimit),
+			Limit:      aws.Int32(shardLimit),
 		})
 		require.NoError(t, err, "Error describing stream")
-		if *desc.StreamDescription.StreamStatus == "ACTIVE" {
+		if desc.StreamDescription.StreamStatus == "ACTIVE" {
 			break
 		}
 		select {
@@ -608,7 +619,7 @@ func TestSplit(t *testing.T) {
 		}
 	}
 	newShards := desc.StreamDescription.Shards
-	require.Equal(t, shardCount+1, int64(len(newShards)), "Wrong number of shards after merging")
+	require.Equal(t, shardCount+1, int32(len(newShards)), "Wrong number of shards after merging")
 
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
