@@ -3,12 +3,12 @@
 package mocks
 
 import (
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"reflect"
 	"testing"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 )
 
 func TestMockDynamo(t *testing.T) {
@@ -26,7 +26,7 @@ func TestMockDynamo(t *testing.T) {
 		Name: "Ken Thompson",
 		ID:   1,
 	}
-	user1, err := dynamodbattribute.MarshalMap(ken)
+	user1, err := attributevalue.MarshalMap(ken)
 	if err != nil {
 		t.Fatalf("MarshalMap(user1) err=%q", err)
 	}
@@ -34,20 +34,20 @@ func TestMockDynamo(t *testing.T) {
 		Name: "Rob Pike",
 		ID:   2,
 	}
-	user2, err := dynamodbattribute.MarshalMap(rob)
+	user2, err := attributevalue.MarshalMap(rob)
 	if err != nil {
 		t.Fatalf("MarshalMap(user2) err=%q", err)
 	}
 
 	// Put the objects in
-	if _, err = mock.PutItem(&dynamodb.PutItemInput{
+	if _, err = mock.PutItem(t.Context(), &dynamodb.PutItemInput{
 		TableName: aws.String(table),
 		Item:      user1,
 	}); err != nil {
 		t.Errorf("PutItem(user1) err=%q", err)
 	}
 
-	if _, err = mock.PutItem(&dynamodb.PutItemInput{
+	if _, err = mock.PutItem(t.Context(), &dynamodb.PutItemInput{
 		TableName: aws.String(table),
 		Item:      user2,
 	}); err != nil {
@@ -55,7 +55,7 @@ func TestMockDynamo(t *testing.T) {
 	}
 
 	// Try putting one into a nonexistent table - this should error
-	if _, err = mock.PutItem(&dynamodb.PutItemInput{
+	if _, err = mock.PutItem(t.Context(), &dynamodb.PutItemInput{
 		TableName: aws.String("nonexistent table"),
 		Item:      user1,
 	}); err == nil {
@@ -63,10 +63,10 @@ func TestMockDynamo(t *testing.T) {
 	}
 
 	// Get user1 back out
-	resp, err := mock.GetItem(&dynamodb.GetItemInput{
+	resp, err := mock.GetItem(t.Context(), &dynamodb.GetItemInput{
 		TableName: aws.String(table),
-		Key: map[string]*dynamodb.AttributeValue{
-			"ID": {N: aws.String("1")},
+		Key: map[string]types.AttributeValue{
+			"ID": &types.AttributeValueMemberN{Value: "1"},
 		},
 	})
 	if err != nil {
@@ -74,45 +74,11 @@ func TestMockDynamo(t *testing.T) {
 	}
 
 	var returnedUser user
-	if err = dynamodbattribute.UnmarshalMap(resp.Item, &returnedUser); err != nil {
+	if err = attributevalue.UnmarshalMap(resp.Item, &returnedUser); err != nil {
 		t.Fatalf("UnmarshalMap(GetItem response) err=%q", err)
 	}
 
 	if !reflect.DeepEqual(ken, returnedUser) {
 		t.Errorf("Unexpected response from GetItem call. have=%+v  want=%+v", returnedUser, ken)
 	}
-
-	// Scan users with a filter
-	scanInput := &dynamodb.ScanInput{
-		TableName:        aws.String(table),
-		FilterExpression: aws.String("ID > :id"),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":id": {N: aws.String("1")},
-		},
-	}
-
-	var result []user
-	err = mock.ScanPages(scanInput, func(page *dynamodb.ScanOutput, last bool) bool {
-		for _, item := range page.Items {
-			var u user
-			err = dynamodbattribute.UnmarshalMap(item, &u)
-			if err != nil {
-				t.Fatalf("UnmarshalMap(Scan response) err=%q", err)
-			}
-			result = append(result, u)
-		}
-		return !last
-	})
-	if err != nil {
-		t.Errorf("ScanPages err=%q", err)
-	}
-
-	if len(result) == 1 {
-		if !reflect.DeepEqual(result[0], rob) {
-			t.Errorf("Unexpected result in scan response. have=%+v  want=%+v", result[0], rob)
-		}
-	} else {
-		t.Errorf("Unexpected number of results from scan, have=%d  want=%d", len(result), 1)
-	}
-
 }

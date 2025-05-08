@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -12,8 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/google/uuid"
 	"github.com/twitchscience/kinsumer"
 	"github.com/twitchscience/kinsumer/statsd"
@@ -57,13 +57,14 @@ func initKinsumer() {
 	}
 
 	config := kinsumer.NewConfig().WithStats(stats)
-	session := session.Must(session.NewSession(aws.NewConfig()))
+
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background())
 
 	// kinsumer needs a way to differentiate between running clients, generally you want to use information
 	// about the machine it is running on like ip. For this example we'll use a uuid
 	name := uuid.New().String()
 
-	k, err = kinsumer.NewWithSession(session, kinesisStreamName, "noopkinsumer", name, config)
+	k, err = kinsumer.NewWithConfig(cfg, kinesisStreamName, "noopkinsumer", name, config)
 	if err != nil {
 		log.Fatalf("Error creating kinsumer: %v", err)
 	}

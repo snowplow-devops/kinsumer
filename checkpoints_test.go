@@ -3,10 +3,9 @@
 package kinsumer
 
 import (
+	"github.com/twitchscience/kinsumer/mocks"
 	"testing"
 	"time"
-
-	"github.com/twitchscience/kinsumer/mocks"
 )
 
 func TestCheckpointer(t *testing.T) {

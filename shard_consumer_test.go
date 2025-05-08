@@ -2,14 +2,16 @@ package kinsumer
 
 import (
 	"fmt"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +23,7 @@ func TestShardConsumer(t *testing.T) {
 	}
 	streamName := "TestShardConsumer_stream"
 
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -34,12 +36,11 @@ func TestShardConsumer(t *testing.T) {
 	config := NewConfig().WithBufferSize(1000)
 	config = config.WithShardCheckFrequency(500 * time.Millisecond)
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard := *desc.StreamDescription.Shards[0].ShardId // Get shard ID
@@ -62,7 +63,7 @@ func TestForcefulOwnershipChange(t *testing.T) {
 	}
 	streamName := "TestForcefulOwnershipChange_stream"
 
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -90,9 +91,9 @@ func TestForcefulOwnershipChange(t *testing.T) {
 	require.NoError(t, err1)
 	require.NoError(t, err2)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard := *desc.StreamDescription.Shards[0].ShardId // Get shard ID
@@ -123,10 +124,10 @@ OwnerChangeLoop:
 			lastK1Record = k1record
 			break getEventLoop
 		case k2record := <-kinsumer2.records: // if kisumer2 gets it, ownership has changed. Ack then move on to the test.
-			k2record.checkpointer.update(aws.StringValue(k2record.record.SequenceNumber))
+			k2record.checkpointer.update(aws.ToString(k2record.record.SequenceNumber))
 			// because this may be called with no genuine record to k1, we use the k2 sequence number.
 			// this shouldn't make a difference since this commit will fail.
-			lastK1Record.checkpointer.update(aws.StringValue(k2record.record.SequenceNumber)) // Ack the last k1 record we have, to instigate behaviour we would see for that client
+			lastK1Record.checkpointer.update(aws.ToString(k2record.record.SequenceNumber)) // Ack the last k1 record we have, to instigate behaviour we would see for that client
 			break OwnerChangeLoop
 		}
 		time.Sleep(120 * time.Millisecond)
@@ -204,7 +205,7 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 	}
 	streamName := "TestPotentialLegitimateDuplicates_stream"
 
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -230,9 +231,9 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config1)
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config2)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard := *desc.StreamDescription.Shards[0].ShardId // Get shard ID
@@ -335,7 +336,7 @@ func TestShardsMerged(t *testing.T) {
 	}
 	streamName := "TestShardsMerged_stream"
 
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -355,9 +356,9 @@ func TestShardsMerged(t *testing.T) {
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
 	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard1 := *desc.StreamDescription.Shards[0].ShardId // Get shard IDs
@@ -386,7 +387,7 @@ func TestShardsMerged(t *testing.T) {
 	}()
 
 	//merge the shards
-	_, err = k.MergeShards(&kinesis.MergeShardsInput{
+	_, err = k.MergeShards(t.Context(), &kinesis.MergeShardsInput{
 		StreamName:           &streamName,
 		ShardToMerge:         aws.String(shard1),
 		AdjacentShardToMerge: aws.String(shard2),
@@ -396,12 +397,12 @@ func TestShardsMerged(t *testing.T) {
 	require.True(t, shardCount <= shardLimit, "Too many shards")
 	timeout := time.After(time.Second)
 	for {
-		desc, err = k.DescribeStream(&kinesis.DescribeStreamInput{
+		desc, err = k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 			StreamName: &streamName,
-			Limit:      aws.Int64(shardLimit),
+			Limit:      aws.Int32(shardLimit),
 		})
 		require.NoError(t, err, "Error describing stream")
-		if *desc.StreamDescription.StreamStatus == "ACTIVE" {
+		if desc.StreamDescription.StreamStatus == "ACTIVE" {
 			break
 		}
 		select {
@@ -508,7 +509,7 @@ func TestConsumerStopStart(t *testing.T) {
 	streamName := "TestConsumerStopStart_stream"
 
 	// Setup
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -526,9 +527,9 @@ func TestConsumerStopStart(t *testing.T) {
 
 	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard1 := *desc.StreamDescription.Shards[0].ShardId // Get shard IDs
@@ -580,7 +581,7 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 	}
 	streamName := "TestMultipleConsumerStopStart_stream"
 
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -600,9 +601,9 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
 	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard1 := *desc.StreamDescription.Shards[0].ShardId // Get shard IDs
@@ -703,7 +704,7 @@ func TestDelayedUpdateDuplicates(t *testing.T) {
 	streamName := "TestDelayedUpdateDuplicates_stream"
 
 	// Setup
-	k, dynamo := kinesisAndDynamoInstances()
+	k, dynamo := kinesisAndDynamoInstances(t)
 
 	defer func() {
 		err := cleanupTestEnvironment(t, k, dynamo, streamName)
@@ -721,9 +722,9 @@ func TestDelayedUpdateDuplicates(t *testing.T) {
 
 	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 
-	desc, err := k.DescribeStream(&kinesis.DescribeStreamInput{
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
-		Limit:      aws.Int64(shardLimit),
+		Limit:      aws.Int32(shardLimit),
 	})
 	require.NoError(t, err, "Error describing stream")
 	shard1 := *desc.StreamDescription.Shards[0].ShardId // Get shard IDs
@@ -751,7 +752,7 @@ ProcessLoop:
 			if v, _ := strconv.Atoi(string(record.record.Data)); v > 89 { // Instead of acking the last few, delay
 				delayedAcks = append(delayedAcks, record)
 			} else {
-				record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+				record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 			}
 			result = append(result, record) // Push everything, acked or not, to the result slice
 			record = nil
@@ -763,7 +764,7 @@ ProcessLoop:
 	// Use a goroutine to wait for a bit (giving kinsumer the chance to stop the consumer), then ack all the remaining records
 	go func() {
 		for _, record := range delayedAcks {
-			record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+			record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 		}
 	}()
 
@@ -808,7 +809,7 @@ ProcessLoop:
 		select {
 		case record := <-dataChannel: // This mimics what Kinsumer does in the Run() function
 			eventsFound = append(eventsFound, record)
-			record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+			record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 			record = nil
 		case <-time.After(delayBeforeReturn):
 			break ProcessLoop
@@ -824,7 +825,7 @@ func TestReadEventsToSlice(t *testing.T) {
 	go func() {
 		for i := 0; i < 100; i++ {
 			dataChannel <- &consumedRecord{
-				record:       &kinesis.Record{},
+				record:       &types.Record{},
 				checkpointer: &checkpointer{},
 				retrievedAt:  time.Time{},
 			}
@@ -872,7 +873,7 @@ func TestReadMultipleToSlice(t *testing.T) {
 	go func() {
 		for i := 0; i < 100; i++ {
 			dataChannel1 <- &consumedRecord{
-				record:       &kinesis.Record{},
+				record:       &types.Record{},
 				checkpointer: &checkpointer{},
 				retrievedAt:  time.Time{},
 			}
@@ -882,7 +883,7 @@ func TestReadMultipleToSlice(t *testing.T) {
 	go func() {
 		for i := 0; i < 25; i++ {
 			datachannel2 <- &consumedRecord{
-				record:       &kinesis.Record{},
+				record:       &types.Record{},
 				checkpointer: &checkpointer{},
 				retrievedAt:  time.Time{},
 			}
@@ -892,7 +893,7 @@ func TestReadMultipleToSlice(t *testing.T) {
 	go func() {
 		for i := 0; i < 350; i++ {
 			datachannel3 <- &consumedRecord{
-				record:       &kinesis.Record{},
+				record:       &types.Record{},
 				checkpointer: &checkpointer{},
 				retrievedAt:  time.Time{},
 			}
@@ -915,21 +916,21 @@ func TestReadMultipleToSlice(t *testing.T) {
 }
 
 // spamStreamModified modifies spamStream to allow us to configure a startingNumber for the data itself to make it easier to identify different chunks of data (and therefore where duplicates come from)
-func spamStreamModified(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64, streamName string, startingNumber int64) error {
+func spamStreamModified(t *testing.T, k kinsumeriface.KinesisAPI, numEvents int64, streamName string, startingNumber int64) error {
 
 	var (
-		records []*kinesis.PutRecordsRequestEntry
+		records []types.PutRecordsRequestEntry
 		counter int64
 	)
 
 	for counter = startingNumber; counter < numEvents+startingNumber; counter++ {
-		records = append(records, &kinesis.PutRecordsRequestEntry{
+		records = append(records, types.PutRecordsRequestEntry{
 			Data:         []byte(strconv.FormatInt(counter, 10)),
 			PartitionKey: aws.String(randStringBytes(10)),
 		})
 
 		if len(records) == 100 {
-			pro, err := k.PutRecords(&kinesis.PutRecordsInput{
+			pro, err := k.PutRecords(t.Context(), &kinesis.PutRecordsInput{
 				StreamName: &streamName,
 				Records:    records,
 			})
@@ -938,14 +939,14 @@ func spamStreamModified(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64
 				return fmt.Errorf("Error putting records onto stream: %s", err)
 			}
 
-			failed := aws.Int64Value(pro.FailedRecordCount)
+			failed := aws.ToInt32(pro.FailedRecordCount)
 			require.EqualValues(t, 0, failed)
 			records = nil
 		}
 	}
 	if len(records) > 0 {
 
-		pro, err := k.PutRecords(&kinesis.PutRecordsInput{
+		pro, err := k.PutRecords(t.Context(), &kinesis.PutRecordsInput{
 			StreamName: &streamName,
 			Records:    records,
 		})
@@ -953,7 +954,7 @@ func spamStreamModified(t *testing.T, k kinesisiface.KinesisAPI, numEvents int64
 			return fmt.Errorf("Error putting records onto stream: %s", err)
 		}
 
-		failed := aws.Int64Value(pro.FailedRecordCount)
+		failed := aws.ToInt32(pro.FailedRecordCount)
 		require.EqualValues(t, 0, failed)
 	}
 
@@ -982,7 +983,7 @@ func TestGetDupesFromSlice(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		rec := &consumedRecord{
-			record: &kinesis.Record{
+			record: &types.Record{
 				Data: []byte(fmt.Sprint(i)),
 			},
 			checkpointer: &checkpointer{},

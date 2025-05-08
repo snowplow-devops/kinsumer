@@ -3,17 +3,19 @@
 package kinsumer
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"sort"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 )
 
 const (
@@ -146,7 +148,7 @@ func (k *Kinsumer) setCachedShardIDs(shardIDs []string) error {
 		return nil
 	}
 	now := time.Now()
-	item, err := dynamodbattribute.MarshalMap(&shardCacheRecord{
+	item, err := attributevalue.MarshalMap(&shardCacheRecord{
 		Key:           shardCacheKey,
 		ShardIDs:      shardIDs,
 		LastUpdate:    now.UnixNano(),
@@ -156,7 +158,7 @@ func (k *Kinsumer) setCachedShardIDs(shardIDs []string) error {
 		return fmt.Errorf("error marshalling map: %v", err)
 	}
 
-	_, err = k.dynamodb.PutItem(&dynamodb.PutItemInput{
+	_, err = k.dynamodb.PutItem(context.Background(), &dynamodb.PutItemInput{
 		TableName: aws.String(k.metadataTableName),
 		Item:      item,
 	})
@@ -202,7 +204,7 @@ func diffShardIDs(curShardIDs, cachedShardIDs []string, checkpoints map[string]*
 // deregisterLeadership marks us as no longer the leader in dynamo.
 func (k *Kinsumer) deregisterLeadership() error {
 	now := time.Now()
-	attrVals, err := dynamodbattribute.MarshalMap(map[string]interface{}{
+	attrVals, err := attributevalue.MarshalMap(map[string]interface{}{
 		":ID":            aws.String(k.clientID),
 		":lastUpdate":    aws.Int64(now.UnixNano()),
 		":lastUpdateRFC": aws.String(now.UTC().Format(time.RFC1123Z)),
@@ -210,10 +212,10 @@ func (k *Kinsumer) deregisterLeadership() error {
 	if err != nil {
 		return fmt.Errorf("error marshaling deregisterLeadership ExpressionAttributeValues: %v", err)
 	}
-	_, err = k.dynamodb.UpdateItem(&dynamodb.UpdateItemInput{
+	_, err = k.dynamodb.UpdateItem(context.Background(), &dynamodb.UpdateItemInput{
 		TableName: aws.String(k.metadataTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"Key": {S: aws.String(leaderKey)},
+		Key: map[string]dbtypes.AttributeValue{
+			"Key": &dbtypes.AttributeValueMemberS{Value: leaderKey},
 		},
 		ConditionExpression:       aws.String("ID = :ID"),
 		UpdateExpression:          aws.String("REMOVE ID SET LastUpdate = :lastUpdate, LastUpdateRFC = :lastUpdateRFC"),
@@ -221,7 +223,8 @@ func (k *Kinsumer) deregisterLeadership() error {
 	})
 	if err != nil {
 		// It's ok if we never actually became leader.
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail {
+		var ccfe *dbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
 			return nil
 		}
 	}
@@ -233,14 +236,14 @@ func (k *Kinsumer) deregisterLeadership() error {
 func (k *Kinsumer) registerLeadership() (bool, error) {
 	now := time.Now()
 	cutoff := now.Add(-k.maxAgeForLeaderRecord).UnixNano()
-	attrVals, err := dynamodbattribute.MarshalMap(map[string]interface{}{
+	attrVals, err := attributevalue.MarshalMap(map[string]interface{}{
 		":ID":     aws.String(k.clientID),
 		":cutoff": aws.Int64(cutoff),
 	})
 	if err != nil {
 		return false, fmt.Errorf("error marshaling registerLeadership ExpressionAttributeValues: %v", err)
 	}
-	item, err := dynamodbattribute.MarshalMap(map[string]interface{}{
+	item, err := attributevalue.MarshalMap(map[string]interface{}{
 		"Key":           aws.String(leaderKey),
 		"ID":            aws.String(k.clientID),
 		"Name":          aws.String(k.clientName),
@@ -250,14 +253,15 @@ func (k *Kinsumer) registerLeadership() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("error marshaling registerLeadership Item: %v", err)
 	}
-	_, err = k.dynamodb.PutItem(&dynamodb.PutItemInput{
+	_, err = k.dynamodb.PutItem(context.Background(), &dynamodb.PutItemInput{
 		TableName:                 aws.String(k.metadataTableName),
 		Item:                      item,
 		ConditionExpression:       aws.String("ID = :ID OR attribute_not_exists(ID) OR LastUpdate <= :cutoff"),
 		ExpressionAttributeValues: attrVals,
 	})
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == conditionalFail {
+		var ccfe *dbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
 			return false, nil
 		}
 		return false, err
@@ -269,8 +273,8 @@ func (k *Kinsumer) registerLeadership() (bool, error) {
 // This function used to use kinesis.DescribeStream, which has a very low throttling limit of 10/s per account.
 // As such, the leader is responsible for caching the shard list.
 // Now that it uses ListShards, you could potentially query the shard list directly from all clients.
-//TODO: Write unit test - needs kinesis mocking
-func loadShardIDsFromKinesis(kin kinesisiface.KinesisAPI, streamName string) ([]string, error) {
+// TODO: Write unit test - needs kinesis mocking
+func loadShardIDsFromKinesis(kin kinsumeriface.KinesisAPI, streamName string) ([]string, error) {
 	var innerError error
 
 	shardIDs := make([]string, 0)
@@ -284,16 +288,15 @@ func loadShardIDsFromKinesis(kin kinesisiface.KinesisAPI, streamName string) ([]
 		} else {
 			inputParams.StreamName = aws.String(streamName)
 		}
-		res, err := kin.ListShards(&inputParams)
+		res, err := kin.ListShards(context.Background(), &inputParams)
 
 		if err != nil {
-			if e, ok := err.(awserr.Error); ok {
-				switch e.Code() {
-				case "ResourceInUseException":
-					innerError = ErrStreamBusy
-				case "ResourceNotFoundException":
-					innerError = ErrNoSuchStream
-				}
+			var riue *ktypes.ResourceInUseException
+			var rnfe *ktypes.ResourceNotFoundException
+			if errors.As(err, &riue) {
+				innerError = ErrStreamBusy
+			} else if errors.As(err, &rnfe) {
+				innerError = ErrNoSuchStream
 			}
 		}
 
@@ -306,7 +309,7 @@ func loadShardIDsFromKinesis(kin kinesisiface.KinesisAPI, streamName string) ([]
 		}
 
 		for _, s := range res.Shards {
-			shardIDs = append(shardIDs, aws.StringValue(s.ShardId))
+			shardIDs = append(shardIDs, aws.ToString(s.ShardId))
 		}
 		if res.NextToken == nil {
 			break
@@ -319,7 +322,7 @@ func loadShardIDsFromKinesis(kin kinesisiface.KinesisAPI, streamName string) ([]
 }
 
 // loadShardIDsFromDynamo returns the sorted slice of shardIDs from the metadata table in dynamo.
-func loadShardIDsFromDynamo(db dynamodbiface.DynamoDBAPI, tableName string) ([]string, error) {
+func loadShardIDsFromDynamo(db kinsumeriface.DynamoDBAPI, tableName string) ([]string, error) {
 	record, err := loadShardCacheFromDynamo(db, tableName)
 	if err != nil {
 		return nil, err
@@ -331,22 +334,23 @@ func loadShardIDsFromDynamo(db dynamodbiface.DynamoDBAPI, tableName string) ([]s
 }
 
 // loadShardCacheFromDynamo returns the ShardCache record from the metadata table in dynamo.
-func loadShardCacheFromDynamo(db dynamodbiface.DynamoDBAPI, tableName string) (*shardCacheRecord, error) {
-	resp, err := db.GetItem(&dynamodb.GetItemInput{
+func loadShardCacheFromDynamo(db kinsumeriface.DynamoDBAPI, tableName string) (*shardCacheRecord, error) {
+	resp, err := db.GetItem(context.Background(), &dynamodb.GetItemInput{
 		TableName:      aws.String(tableName),
 		ConsistentRead: aws.Bool(true),
-		Key: map[string]*dynamodb.AttributeValue{
-			"Key": {S: aws.String(shardCacheKey)},
+		Key: map[string]dbtypes.AttributeValue{
+			"Key": &dbtypes.AttributeValueMemberS{Value: shardCacheKey},
 		},
 	})
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ResourceNotFoundException" {
+		var rnfe *ktypes.ResourceNotFoundException
+		if errors.As(err, &rnfe) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	var record shardCacheRecord
-	if err = dynamodbattribute.UnmarshalMap(resp.Item, &record); err != nil {
+	if err = attributevalue.UnmarshalMap(resp.Item, &record); err != nil {
 		return nil, err
 	}
 	return &record, nil

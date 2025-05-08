@@ -3,18 +3,20 @@
 package kinsumer
 
 import (
+	"context"
 	"fmt"
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
-	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -26,65 +28,65 @@ type shardConsumerError struct {
 }
 
 type consumedRecord struct {
-	record       *kinesis.Record // Record retrieved from kinesis
-	checkpointer *checkpointer   // Object that will store the checkpoint back to the database
-	retrievedAt  time.Time       // Time the record was retrieved from Kinesis
+	record       *ktypes.Record // Record retrieved from kinesis
+	checkpointer *checkpointer  // Object that will store the checkpoint back to the database
+	retrievedAt  time.Time      // Time the record was retrieved from Kinesis
 }
 
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple
 // clients each processing multiple shards
 type Kinsumer struct {
-	kinesis               kinesisiface.KinesisAPI   // interface to the kinesis service
-	dynamodb              dynamodbiface.DynamoDBAPI // interface to the dynamodb service
-	streamName            string                    // name of the kinesis stream to consume from
-	shardIDs              []string                  // all the shards in the stream, for detecting when the shards change
-	stop                  chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
-	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
-	records               chan *consumedRecord      // channel for the go routines to put the consumed records on
-	output                chan *consumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
-	errors                chan error                // channel used to communicate errors back to the caller
-	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
-	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
-	shardErrors           chan shardConsumerError   // all the errors found by the consumers that were not handled
-	clientsTableName      string                    // dynamo table of info about each client
-	checkpointTableName   string                    // dynamo table of the checkpoints for each shard
-	metadataTableName     string                    // dynamo table of metadata about the leader and shards
-	clientID              string                    // identifier to differentiate between the running clients
-	clientName            string                    // display name of the client - used just for debugging
-	totalClients          int                       // The number of clients that are currently working on this stream
-	thisClient            int                       // The (sorted by name) index of this client in the total list
-	config                Config                    // configuration struct
-	numberOfRuns          int32                     // Used to atomically make sure we only ever allow one Run() to be called
-	isLeader              bool                      // Whether this client is the leader
-	unbecomingLeader      sync.Mutex                // Flag to avoid race condition when unbecoming leader
-	isRestartingConsumers bool                      // Flag to indicate that we should only update the clients table while restarting consumers
-	leaderLost            chan bool                 // Channel that receives an event when the node loses leadership
-	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
-	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
-	maxAgeForLeaderRecord time.Duration             // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
+	kinesis               kinsumeriface.KinesisAPI
+	dynamodb              kinsumeriface.DynamoDBAPI
+	streamName            string                  // name of the kinesis stream to consume from
+	shardIDs              []string                // all the shards in the stream, for detecting when the shards change
+	stop                  chan struct{}           // channel used to signal to all the go routines that we want to stop consuming
+	stoprequest           chan bool               // channel used internally to signal to the main go routine to stop processing
+	records               chan *consumedRecord    // channel for the go routines to put the consumed records on
+	output                chan *consumedRecord    // unbuffered channel used to communicate from the main loop to the Next() method
+	errors                chan error              // channel used to communicate errors back to the caller
+	waitGroup             sync.WaitGroup          // waitGroup to sync the consumers go routines on
+	mainWG                sync.WaitGroup          // WaitGroup for the mainLoop
+	shardErrors           chan shardConsumerError // all the errors found by the consumers that were not handled
+	clientsTableName      string                  // dynamo table of info about each client
+	checkpointTableName   string                  // dynamo table of the checkpoints for each shard
+	metadataTableName     string                  // dynamo table of metadata about the leader and shards
+	clientID              string                  // identifier to differentiate between the running clients
+	clientName            string                  // display name of the client - used just for debugging
+	totalClients          int                     // The number of clients that are currently working on this stream
+	thisClient            int                     // The (sorted by name) index of this client in the total list
+	config                Config                  // configuration struct
+	numberOfRuns          int32                   // Used to atomically make sure we only ever allow one Run() to be called
+	isLeader              bool                    // Whether this client is the leader
+	unbecomingLeader      sync.Mutex              // Flag to avoid race condition when unbecoming leader
+	isRestartingConsumers bool                    // Flag to indicate that we should only update the clients table while restarting consumers
+	leaderLost            chan bool               // Channel that receives an event when the node loses leadership
+	leaderWG              sync.WaitGroup          // waitGroup for the leader loop
+	maxAgeForClientRecord time.Duration           // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
+	maxAgeForLeaderRecord time.Duration           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
 func New(streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
-	s, err := session.NewSession()
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	return NewWithSession(s, streamName, applicationName, clientName, config)
+	return NewWithConfig(cfg, streamName, applicationName, clientName, config)
 }
 
 // NewWithSession should be used if you want to override the Kinesis and Dynamo instances with a non-default aws session
-func NewWithSession(session *session.Session, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
-	k := kinesis.New(session)
-	d := dynamodb.New(session)
+func NewWithConfig(cfg aws.Config, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+	k := kinesis.NewFromConfig(cfg)
+	d := dynamodb.NewFromConfig(cfg)
 
 	return NewWithInterfaces(k, d, streamName, applicationName, clientName, "", config)
 }
 
 // NewWithInterfaces allows you to override the Kinesis and Dynamo instances for mocking or using a local set of servers
 func NewWithInterfaces(
-	kinesis kinesisiface.KinesisAPI,
-	dynamodb dynamodbiface.DynamoDBAPI,
+	kinesis kinsumeriface.KinesisAPI,
+	dynamodb kinsumeriface.DynamoDBAPI,
 	streamName,
 	applicationName,
 	clientName string,
@@ -254,13 +256,13 @@ DrainLoop:
 
 // dynamoTableReady returns an error if the given table is not ACTIVE or UPDATING
 func (k *Kinsumer) dynamoTableReady(name string) error {
-	out, err := k.dynamodb.DescribeTable(&dynamodb.DescribeTableInput{
+	out, err := k.dynamodb.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{
 		TableName: aws.String(name),
 	})
 	if err != nil {
 		return fmt.Errorf("error describing table %s: %v", name, err)
 	}
-	status := aws.StringValue(out.Table.TableStatus)
+	status := out.Table.TableStatus
 	if status != "ACTIVE" && status != "UPDATING" {
 		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE' or 'UPDATING'",
 			name, status)
@@ -270,7 +272,7 @@ func (k *Kinsumer) dynamoTableReady(name string) error {
 
 // dynamoTableExists returns an true if the given table exists
 func (k *Kinsumer) dynamoTableExists(name string) bool {
-	_, err := k.dynamodb.DescribeTable(&dynamodb.DescribeTableInput{
+	_, err := k.dynamodb.DescribeTable(context.Background(), &dynamodb.DescribeTableInput{
 		TableName: aws.String(name),
 	})
 	return err == nil
@@ -283,16 +285,16 @@ func (k *Kinsumer) dynamoCreateTableIfNotExists(name, distKey string) error {
 		return nil
 	}
 
-	_, err := k.dynamodb.CreateTable(&dynamodb.CreateTableInput{
-		AttributeDefinitions: []*dynamodb.AttributeDefinition{{
+	_, err := k.dynamodb.CreateTable(context.Background(), &dynamodb.CreateTableInput{
+		AttributeDefinitions: []dbtypes.AttributeDefinition{{
 			AttributeName: aws.String(distKey),
-			AttributeType: aws.String(dynamodb.ScalarAttributeTypeS),
+			AttributeType: dbtypes.ScalarAttributeTypeS,
 		}},
-		KeySchema: []*dynamodb.KeySchemaElement{{
+		KeySchema: []dbtypes.KeySchemaElement{{
 			AttributeName: aws.String(distKey),
-			KeyType:       aws.String(dynamodb.KeyTypeHash),
+			KeyType:       dbtypes.KeyTypeHash,
 		}},
-		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+		ProvisionedThroughput: &dbtypes.ProvisionedThroughput{
 			ReadCapacityUnits:  aws.Int64(k.config.dynamoReadCapacity),
 			WriteCapacityUnits: aws.Int64(k.config.dynamoWriteCapacity),
 		},
@@ -301,13 +303,14 @@ func (k *Kinsumer) dynamoCreateTableIfNotExists(name, distKey string) error {
 	if err != nil {
 		return err
 	}
-	err = k.dynamodb.WaitUntilTableExistsWithContext(
-		aws.BackgroundContext(),
-		&dynamodb.DescribeTableInput{
-			TableName: aws.String(name),
-		},
-		request.WithWaiterDelay(request.ConstantWaiterDelay(k.config.dynamoWaiterDelay)),
-	)
+	waiter := dynamodb.NewTableExistsWaiter(k.dynamodb, func(options *dynamodb.TableExistsWaiterOptions) {
+		options.MinDelay = k.config.dynamoWaiterDelay
+		options.MaxDelay = k.config.dynamoWaiterDelay
+	})
+
+	err = waiter.Wait(context.Background(), &dynamodb.DescribeTableInput{
+		TableName: aws.String(name),
+	}, 5*time.Minute)
 	return err
 }
 
@@ -317,26 +320,28 @@ func (k *Kinsumer) dynamoDeleteTableIfExists(name string) error {
 	if !k.dynamoTableExists(name) {
 		return nil
 	}
-	_, err := k.dynamodb.DeleteTable(&dynamodb.DeleteTableInput{
+	_, err := k.dynamodb.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{
 		TableName: aws.String(name),
 	})
 	if err != nil {
 		return err
 	}
-	err = k.dynamodb.WaitUntilTableNotExistsWithContext(
-		aws.BackgroundContext(),
-		&dynamodb.DescribeTableInput{
-			TableName: aws.String(name),
-		},
-		request.WithWaiterDelay(request.ConstantWaiterDelay(k.config.dynamoWaiterDelay)),
-	)
+
+	waiter := dynamodb.NewTableNotExistsWaiter(k.dynamodb, func(options *dynamodb.TableNotExistsWaiterOptions) {
+		options.MinDelay = k.config.dynamoWaiterDelay
+		options.MaxDelay = k.config.dynamoWaiterDelay
+	})
+
+	err = waiter.Wait(context.Background(), &dynamodb.DescribeTableInput{
+		TableName: aws.String(name),
+	}, 5*time.Minute)
 	return err
 }
 
 // kinesisStreamReady returns an error if the given stream is not ACTIVE
 func (k *Kinsumer) kinesisStreamReady() error {
 	if k.config.useListShardsForKinesisStreamReady {
-		_, err := k.kinesis.ListShards(&kinesis.ListShardsInput{
+		_, err := k.kinesis.ListShards(context.Background(), &kinesis.ListShardsInput{
 			StreamName: aws.String(k.streamName),
 		})
 		if err != nil {
@@ -344,14 +349,14 @@ func (k *Kinsumer) kinesisStreamReady() error {
 		}
 		return nil
 	}
-	out, err := k.kinesis.DescribeStream(&kinesis.DescribeStreamInput{
+	out, err := k.kinesis.DescribeStream(context.Background(), &kinesis.DescribeStreamInput{
 		StreamName: aws.String(k.streamName),
 	})
 	if err != nil {
 		return fmt.Errorf("error describing stream %s: %v", k.streamName, err)
 	}
 
-	status := aws.StringValue(out.StreamDescription.StreamStatus)
+	status := out.StreamDescription.StreamStatus
 	if status != "ACTIVE" && status != "UPDATING" {
 		return fmt.Errorf("stream %s exists but state '%s' is not 'ACTIVE' or 'UPDATING'", k.streamName, status)
 	}
@@ -441,7 +446,7 @@ func (k *Kinsumer) Run() error {
 			case record = <-input:
 			case output <- record:
 				if !k.config.manualCheckpointing {
-					record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+					record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 				}
 				record = nil
 			case se := <-k.shardErrors:
@@ -511,7 +516,7 @@ func (k *Kinsumer) Next() (data []byte, err error) {
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and record is nil then kinsumer has been stopped
-func (k *Kinsumer) NextRecord() (rec *kinesis.Record, err error) {
+func (k *Kinsumer) NextRecord() (rec *ktypes.Record, err error) {
 	if k.config.manualCheckpointing {
 		return nil, fmt.Errorf("manual checkpointing is enabled, use NextRecordWithCheckpointer() instead")
 	}
@@ -548,7 +553,7 @@ func (k *Kinsumer) NextWithCheckpointer() (data []byte, checkpointer func(), err
 		if ok {
 			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
 			data = record.record.Data
-			checkpointer = record.checkpointer.updateFunc(aws.StringValue(record.record.SequenceNumber))
+			checkpointer = record.checkpointer.updateFunc(aws.ToString(record.record.SequenceNumber))
 		}
 	}
 
@@ -562,7 +567,7 @@ func (k *Kinsumer) NextWithCheckpointer() (data []byte, checkpointer func(), err
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and data is nil then kinsumer has been stopped
-func (k *Kinsumer) NextRecordWithCheckpointer() (rec *kinesis.Record, checkpointer func(), err error) {
+func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointer func(), err error) {
 	if !k.config.manualCheckpointing {
 		return nil, nil, fmt.Errorf("manual checkpointing is disabled, use NextRecord() instead")
 	}
@@ -574,7 +579,7 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *kinesis.Record, checkpoint
 		if ok {
 			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
 			rec = record.record
-			checkpointer = record.checkpointer.updateFunc(aws.StringValue(record.record.SequenceNumber))
+			checkpointer = record.checkpointer.updateFunc(aws.ToString(record.record.SequenceNumber))
 		}
 	}
 
