@@ -31,6 +31,13 @@ type Config struct {
 	// Starting timestamp of the shard iterator, if "AT_TIMESTAMP" is the desired iterator type
 	iteratorStartTimestamp *time.Time
 
+	// Iterator type to use when starting from an empty checkpoint (no previous sequence number)
+	// Valid values: 
+	//   "" or "TRIM_HORIZON" (default): Start reading from the oldest available record
+	//   "LATEST": Start reading from the newest record (skip existing data)
+	//   "AT_TIMESTAMP": Use iteratorStartTimestamp to specify start position
+	iteratorType string
+
 	// ---------- [ For the leader (first client alphabetically) ] ----------
 	// Time between leader actions
 	leaderActionFrequency time.Duration
@@ -127,6 +134,17 @@ func (c Config) WithIteratorStartTimestamp(timestamp *time.Time) Config {
 	return c
 }
 
+// WithIteratorType returns a Config with a modified iterator type for new checkpoints
+// This determines where to start reading when no previous checkpoint exists.
+// Valid values:
+//   "" or "TRIM_HORIZON" (default): Start from the oldest available record
+//   "LATEST": Start from the newest record (skip all existing data)
+//   "AT_TIMESTAMP": Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
+func (c Config) WithIteratorType(iteratorType string) Config {
+	c.iteratorType = iteratorType
+	return c
+}
+
 // WithDynamoReadCapacity returns a Config with a modified dynamo read capacity
 func (c Config) WithDynamoReadCapacity(readCapacity int64) Config {
 	c.dynamoReadCapacity = readCapacity
@@ -197,6 +215,14 @@ func validateConfig(c *Config) error {
 
 	if c.logger == nil {
 		return ErrConfigInvalidLogger
+	}
+
+	if c.iteratorType != "" && c.iteratorType != "TRIM_HORIZON" && c.iteratorType != "LATEST" && c.iteratorType != "AT_TIMESTAMP" {
+		return ErrConfigInvalidIteratorType
+	}
+
+	if c.iteratorType == "AT_TIMESTAMP" && c.iteratorStartTimestamp == nil {
+		return ErrConfigInvalidIteratorTimestamp
 	}
 
 	return nil
