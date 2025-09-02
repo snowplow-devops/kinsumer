@@ -4,6 +4,8 @@ package kinsumer
 
 import (
 	"time"
+
+	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 )
 
 //TODO: Update documentation to include the defaults
@@ -33,10 +35,10 @@ type Config struct {
 
 	// Iterator type to use when starting from an empty checkpoint (no previous sequence number)
 	// Valid values: 
-	//   "" or "TRIM_HORIZON" (default): Start reading from the oldest available record
-	//   "LATEST": Start reading from the newest record (skip existing data)
-	//   "AT_TIMESTAMP": Use iteratorStartTimestamp to specify start position
-	iteratorType string
+	//   ktypes.ShardIteratorTypeTrimHorizon (default): Start reading from the oldest available record
+	//   ktypes.ShardIteratorTypeLatest: Start reading from the newest record (skip existing data)
+	//   ktypes.ShardIteratorTypeAtTimestamp: Use iteratorStartTimestamp to specify start position
+	iteratorType ktypes.ShardIteratorType
 
 	// ---------- [ For the leader (first client alphabetically) ] ----------
 	// Time between leader actions
@@ -74,6 +76,7 @@ func NewConfig() Config {
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
+		iteratorType:          ktypes.ShardIteratorTypeTrimHorizon,
 	}
 }
 
@@ -137,10 +140,10 @@ func (c Config) WithIteratorStartTimestamp(timestamp *time.Time) Config {
 // WithIteratorType returns a Config with a modified iterator type for new checkpoints
 // This determines where to start reading when no previous checkpoint exists.
 // Valid values:
-//   "" or "TRIM_HORIZON" (default): Start from the oldest available record
-//   "LATEST": Start from the newest record (skip all existing data)
-//   "AT_TIMESTAMP": Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
-func (c Config) WithIteratorType(iteratorType string) Config {
+//   ktypes.ShardIteratorTypeTrimHorizon (default): Start from the oldest available record
+//   ktypes.ShardIteratorTypeLatest: Start from the newest record (skip all existing data)
+//   ktypes.ShardIteratorTypeAtTimestamp: Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
+func (c Config) WithIteratorType(iteratorType ktypes.ShardIteratorType) Config {
 	c.iteratorType = iteratorType
 	return c
 }
@@ -217,11 +220,15 @@ func validateConfig(c *Config) error {
 		return ErrConfigInvalidLogger
 	}
 
-	if c.iteratorType != "" && c.iteratorType != "TRIM_HORIZON" && c.iteratorType != "LATEST" && c.iteratorType != "AT_TIMESTAMP" {
+	// Validate iterator type is supported (zero value defaults to TRIM_HORIZON)
+	if c.iteratorType != "" && 
+		c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon && 
+		c.iteratorType != ktypes.ShardIteratorTypeLatest && 
+		c.iteratorType != ktypes.ShardIteratorTypeAtTimestamp {
 		return ErrConfigInvalidIteratorType
 	}
 
-	if c.iteratorType == "AT_TIMESTAMP" && c.iteratorStartTimestamp == nil {
+	if c.iteratorType == ktypes.ShardIteratorTypeAtTimestamp && c.iteratorStartTimestamp == nil {
 		return ErrConfigInvalidIteratorTimestamp
 	}
 

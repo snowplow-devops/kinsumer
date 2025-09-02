@@ -23,8 +23,8 @@ const (
 )
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
-// iteratorType specifies the type to use when sequenceNumber is empty: "TRIM_HORIZON" (default), "LATEST", or "AT_TIMESTAMP"
-func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time, iteratorType string) (string, error) {
+// iteratorType specifies the type to use when sequenceNumber is empty
+func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time, iteratorType ktypes.ShardIteratorType) (string, error) {
 	shardIteratorType := ktypes.ShardIteratorTypeAfterSequenceNumber
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
@@ -33,13 +33,13 @@ func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID str
 	if sequenceNumber == "" {
 		// Use configured iterator type for new checkpoints
 		switch iteratorType {
-		case "LATEST":
+		case ktypes.ShardIteratorTypeLatest:
 			shardIteratorType = ktypes.ShardIteratorTypeLatest
 			ps = nil
-		case "AT_TIMESTAMP":
+		case ktypes.ShardIteratorTypeAtTimestamp:
 			shardIteratorType = ktypes.ShardIteratorTypeAtTimestamp
 			ps = nil
-		default: // "" or "TRIM_HORIZON"
+		default: // ktypes.ShardIteratorTypeTrimHorizon or empty
 			shardIteratorType = ktypes.ShardIteratorTypeTrimHorizon
 			ps = nil
 		}
