@@ -34,7 +34,7 @@ type Config struct {
 	iteratorStartTimestamp *time.Time
 
 	// Iterator type to use when starting from an empty checkpoint (no previous sequence number)
-	// Valid values: 
+	// Valid values:
 	//   ktypes.ShardIteratorTypeTrimHorizon (default): Start reading from the oldest available record
 	//   ktypes.ShardIteratorTypeLatest: Start reading from the newest record (skip existing data)
 	//   ktypes.ShardIteratorTypeAtTimestamp: Use iteratorStartTimestamp to specify start position
@@ -61,6 +61,11 @@ type Config struct {
 
 	// use ListShards to avoid LimitExceedException from DescribeStream
 	useListShardsForKinesisStreamReady bool
+
+	// Maximum number of records to fetch per GetRecords request
+	// AWS Kinesis allows up to 10,000 records per request (default)
+	// Reducing this value helps control memory usage at the cost of increased API calls
+	getRecordsLimit int
 }
 
 // NewConfig returns a default Config struct
@@ -77,6 +82,7 @@ func NewConfig() Config {
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
 		iteratorType:          ktypes.ShardIteratorTypeLatest,
+		getRecordsLimit:       10000,
 	}
 }
 
@@ -140,9 +146,10 @@ func (c Config) WithIteratorStartTimestamp(timestamp *time.Time) Config {
 // WithIteratorType returns a Config with a modified iterator type for new checkpoints
 // This determines where to start reading when no previous checkpoint exists.
 // Valid values:
-//   ktypes.ShardIteratorTypeTrimHorizon (default): Start from the oldest available record
-//   ktypes.ShardIteratorTypeLatest: Start from the newest record (skip all existing data)
-//   ktypes.ShardIteratorTypeAtTimestamp: Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
+//
+//	ktypes.ShardIteratorTypeTrimHorizon (default): Start from the oldest available record
+//	ktypes.ShardIteratorTypeLatest: Start from the newest record (skip all existing data)
+//	ktypes.ShardIteratorTypeAtTimestamp: Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
 func (c Config) WithIteratorType(iteratorType ktypes.ShardIteratorType) Config {
 	c.iteratorType = iteratorType
 	return c
@@ -175,6 +182,14 @@ func (c Config) WithLogger(logger Logger) Config {
 // WithUseListShardsForKinesisStreamReady returns a config with a modified useListShardsForKinesisStreamReady toggle
 func (c Config) WithUseListShardsForKinesisStreamReady(shouldUse bool) Config {
 	c.useListShardsForKinesisStreamReady = shouldUse
+	return c
+}
+
+// WithGetRecordsLimit returns a Config with a modified maximum records per GetRecords request
+// This controls how many records to fetch per GetRecords API call.
+// AWS Kinesis allows up to 10,000 records per request. Reducing this helps control memory usage.
+func (c Config) WithGetRecordsLimit(getRecordsLimit int) Config {
+	c.getRecordsLimit = getRecordsLimit
 	return c
 }
 
@@ -221,14 +236,18 @@ func validateConfig(c *Config) error {
 	}
 
 	// Validate iterator type is supported (empty string not allowed)
-	if c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon && 
-		c.iteratorType != ktypes.ShardIteratorTypeLatest && 
+	if c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon &&
+		c.iteratorType != ktypes.ShardIteratorTypeLatest &&
 		c.iteratorType != ktypes.ShardIteratorTypeAtTimestamp {
 		return ErrConfigInvalidIteratorType
 	}
 
 	if c.iteratorType == ktypes.ShardIteratorTypeAtTimestamp && c.iteratorStartTimestamp == nil {
 		return ErrConfigInvalidIteratorTimestamp
+	}
+
+	if c.getRecordsLimit <= 0 || c.getRecordsLimit > 10000 {
+		return ErrConfigInvalidGetRecordsLimit
 	}
 
 	return nil
