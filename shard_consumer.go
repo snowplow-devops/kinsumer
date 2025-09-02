@@ -33,15 +33,17 @@ func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID str
 	if sequenceNumber == "" {
 		// Use configured iterator type for new checkpoints
 		switch iteratorType {
+		case ktypes.ShardIteratorTypeTrimHorizon:
+			shardIteratorType = ktypes.ShardIteratorTypeTrimHorizon
+			ps = nil
 		case ktypes.ShardIteratorTypeLatest:
 			shardIteratorType = ktypes.ShardIteratorTypeLatest
 			ps = nil
 		case ktypes.ShardIteratorTypeAtTimestamp:
 			shardIteratorType = ktypes.ShardIteratorTypeAtTimestamp
 			ps = nil
-		default: // ktypes.ShardIteratorTypeTrimHorizon or empty
-			shardIteratorType = ktypes.ShardIteratorTypeTrimHorizon
-			ps = nil
+		default:
+			return "", fmt.Errorf("unsupported iterator type: %v", iteratorType)
 		}
 	} else if sequenceNumber == "LATEST" {
 		// Backward compatibility: support "LATEST" as sequence number

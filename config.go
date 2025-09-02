@@ -76,7 +76,7 @@ func NewConfig() Config {
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
-		iteratorType:          ktypes.ShardIteratorTypeTrimHorizon,
+		iteratorType:          ktypes.ShardIteratorTypeLatest,
 	}
 }
 
@@ -220,9 +220,8 @@ func validateConfig(c *Config) error {
 		return ErrConfigInvalidLogger
 	}
 
-	// Validate iterator type is supported (zero value defaults to TRIM_HORIZON)
-	if c.iteratorType != "" && 
-		c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon && 
+	// Validate iterator type is supported (empty string not allowed)
+	if c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon && 
 		c.iteratorType != ktypes.ShardIteratorTypeLatest && 
 		c.iteratorType != ktypes.ShardIteratorTypeAtTimestamp {
 		return ErrConfigInvalidIteratorType
