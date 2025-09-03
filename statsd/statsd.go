@@ -58,3 +58,9 @@ func (s *Statsd) EventsFromKinesis(num int, shardID string, lag time.Duration) {
 	_ = s.client.TimingDuration(fmt.Sprintf("kinsumer.%s.lag", shardID), lag, 1.0)
 	_ = s.client.Inc(fmt.Sprintf("kinsumer.%s.retrieved", shardID), int64(num), 1.0)
 }
+
+// RecordsInMemory implementation that writes to statsd a gauge metric about
+// the current number of records buffered in memory
+func (s *Statsd) RecordsInMemory(count int) {
+	_ = s.client.Gauge("kinsumer.records_in_memory", int64(count), 1.0)
+}

@@ -27,4 +27,10 @@ type StatReceiver interface {
 	// `shardID` ID of the shard that the records were retrieved from
 	// `lag` How far the records are from the tip of the stream.
 	EventsFromKinesis(num int, shardID string, lag time.Duration)
+
+	// RecordsInMemory is called periodically to report the current number of records
+	// that have been pulled from Kinesis and are buffered in memory, waiting to be
+	// delivered to the client.
+	// `count` Current number of records in the internal buffer
+	RecordsInMemory(count int)
 }

@@ -424,6 +424,12 @@ func (k *Kinsumer) Run() error {
 			shardChangeTicker.Stop()
 		}()
 
+		// Report buffer size every 5 seconds
+		bufferReportTicker := time.NewTicker(5 * time.Second)
+		defer func() {
+			bufferReportTicker.Stop()
+		}()
+
 		var record *consumedRecord
 		if err := k.startConsumers(); err != nil {
 			k.errors <- fmt.Errorf("error starting consumers: %s", err)
@@ -480,6 +486,9 @@ func (k *Kinsumer) Run() error {
 
 					k.isRestartingConsumers = false
 				}
+			case <-bufferReportTicker.C:
+				// Report the current number of records buffered in memory
+				k.config.stats.RecordsInMemory(len(k.records))
 			}
 		}
 	}()
