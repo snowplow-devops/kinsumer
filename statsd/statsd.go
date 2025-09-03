@@ -14,11 +14,13 @@ type Statsd struct {
 	client statsd.StatSender
 }
 
-// New creates a new Statsd statreceiver with a new instance of a cactus statter
+// New creates a new Statsd statreceiver with buffering enabled by default
 func New(addr, prefix string) (*Statsd, error) {
 	sd, err := statsd.NewClientWithConfig(&statsd.ClientConfig{
-		Address: addr,
-		Prefix:  prefix,
+		Address:       addr,
+		Prefix:        prefix,
+		UseBuffered:   true,                    // Enable buffering by default
+		FlushInterval: 1 * time.Second,        // Sensible default flush interval
 	})
 
 	if err != nil {
