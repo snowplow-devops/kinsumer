@@ -42,6 +42,8 @@ var (
 	ErrConfigInvalidIteratorType = errors.New("iteratorType must be one of: ShardIteratorTypeTrimHorizon, ShardIteratorTypeLatest, ShardIteratorTypeAtTimestamp")
 	// ErrConfigInvalidIteratorTimestamp - AT_TIMESTAMP iterator type requires a timestamp
 	ErrConfigInvalidIteratorTimestamp = errors.New("iteratorType AT_TIMESTAMP requires iteratorStartTimestamp to be set")
+	// ErrConfigInvalidGetRecordsLimit - getRecordsLimit must be between 1 and 10000
+	ErrConfigInvalidGetRecordsLimit = errors.New("getRecordsLimit must be between 1 and 10000")
 
 	// ErrStreamBusy - Stream is busy
 	ErrStreamBusy = errors.New("stream is busy")
