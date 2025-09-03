@@ -38,6 +38,10 @@ var (
 	ErrConfigInvalidDynamoCapacity = errors.New("dynamo read/write capacity cannot be 0")
 	// ErrConfigInvalidLogger - Logger cannot be nil
 	ErrConfigInvalidLogger = errors.New("logger cannot be nil")
+	// ErrConfigInvalidIteratorType - Iterator type must be a supported value
+	ErrConfigInvalidIteratorType = errors.New("iteratorType must be one of: ShardIteratorTypeTrimHorizon, ShardIteratorTypeLatest, ShardIteratorTypeAtTimestamp")
+	// ErrConfigInvalidIteratorTimestamp - AT_TIMESTAMP iterator type requires a timestamp
+	ErrConfigInvalidIteratorTimestamp = errors.New("iteratorType AT_TIMESTAMP requires iteratorStartTimestamp to be set")
 
 	// ErrStreamBusy - Stream is busy
 	ErrStreamBusy = errors.New("stream is busy")

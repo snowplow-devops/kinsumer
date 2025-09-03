@@ -4,6 +4,8 @@ package kinsumer
 
 import (
 	"time"
+
+	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 )
 
 //TODO: Update documentation to include the defaults
@@ -30,6 +32,13 @@ type Config struct {
 
 	// Starting timestamp of the shard iterator, if "AT_TIMESTAMP" is the desired iterator type
 	iteratorStartTimestamp *time.Time
+
+	// Iterator type to use when starting from an empty checkpoint (no previous sequence number)
+	// Valid values: 
+	//   ktypes.ShardIteratorTypeTrimHorizon (default): Start reading from the oldest available record
+	//   ktypes.ShardIteratorTypeLatest: Start reading from the newest record (skip existing data)
+	//   ktypes.ShardIteratorTypeAtTimestamp: Use iteratorStartTimestamp to specify start position
+	iteratorType ktypes.ShardIteratorType
 
 	// ---------- [ For the leader (first client alphabetically) ] ----------
 	// Time between leader actions
@@ -67,6 +76,7 @@ func NewConfig() Config {
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
+		iteratorType:          ktypes.ShardIteratorTypeLatest,
 	}
 }
 
@@ -124,6 +134,17 @@ func (c Config) WithStats(stats StatReceiver) Config {
 // WithIteratorStartTimestamp returns a Config with a modified iteratorStartTimestamp
 func (c Config) WithIteratorStartTimestamp(timestamp *time.Time) Config {
 	c.iteratorStartTimestamp = timestamp
+	return c
+}
+
+// WithIteratorType returns a Config with a modified iterator type for new checkpoints
+// This determines where to start reading when no previous checkpoint exists.
+// Valid values:
+//   ktypes.ShardIteratorTypeTrimHorizon (default): Start from the oldest available record
+//   ktypes.ShardIteratorTypeLatest: Start from the newest record (skip all existing data)
+//   ktypes.ShardIteratorTypeAtTimestamp: Start from iteratorStartTimestamp (must also call WithIteratorStartTimestamp)
+func (c Config) WithIteratorType(iteratorType ktypes.ShardIteratorType) Config {
+	c.iteratorType = iteratorType
 	return c
 }
 
@@ -197,6 +218,17 @@ func validateConfig(c *Config) error {
 
 	if c.logger == nil {
 		return ErrConfigInvalidLogger
+	}
+
+	// Validate iterator type is supported (empty string not allowed)
+	if c.iteratorType != ktypes.ShardIteratorTypeTrimHorizon && 
+		c.iteratorType != ktypes.ShardIteratorTypeLatest && 
+		c.iteratorType != ktypes.ShardIteratorTypeAtTimestamp {
+		return ErrConfigInvalidIteratorType
+	}
+
+	if c.iteratorType == ktypes.ShardIteratorTypeAtTimestamp && c.iteratorStartTimestamp == nil {
+		return ErrConfigInvalidIteratorTimestamp
 	}
 
 	return nil

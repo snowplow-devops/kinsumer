@@ -23,19 +23,30 @@ const (
 )
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
-func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time) (string, error) {
+// iteratorType specifies the type to use when sequenceNumber is empty
+func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time, iteratorType ktypes.ShardIteratorType) (string, error) {
 	shardIteratorType := ktypes.ShardIteratorTypeAfterSequenceNumber
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
-	// from the horizon
+	// based on the configured iterator type
 	ps := aws.String(sequenceNumber)
-	if sequenceNumber == "" && iteratorStartTimestamp != nil {
-		shardIteratorType = ktypes.ShardIteratorTypeAtTimestamp
-		ps = nil
-	} else if sequenceNumber == "" {
-		shardIteratorType = ktypes.ShardIteratorTypeTrimHorizon
-		ps = nil
+	if sequenceNumber == "" {
+		// Use configured iterator type for new checkpoints
+		switch iteratorType {
+		case ktypes.ShardIteratorTypeTrimHorizon:
+			shardIteratorType = ktypes.ShardIteratorTypeTrimHorizon
+			ps = nil
+		case ktypes.ShardIteratorTypeLatest:
+			shardIteratorType = ktypes.ShardIteratorTypeLatest
+			ps = nil
+		case ktypes.ShardIteratorTypeAtTimestamp:
+			shardIteratorType = ktypes.ShardIteratorTypeAtTimestamp
+			ps = nil
+		default:
+			return "", fmt.Errorf("unsupported iterator type: %v", iteratorType)
+		}
 	} else if sequenceNumber == "LATEST" {
+		// Backward compatibility: support "LATEST" as sequence number
 		shardIteratorType = ktypes.ShardIteratorTypeLatest
 		ps = nil
 	}
@@ -143,7 +154,7 @@ func (k *Kinsumer) consume(shardID string) {
 	}()
 
 	// Get the starting shard iterator
-	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber, k.config.iteratorStartTimestamp)
+	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber, k.config.iteratorStartTimestamp, k.config.iteratorType)
 	if err != nil {
 		k.shardErrors <- shardConsumerError{shardID: shardID, action: "getShardIterator", err: err}
 		return
@@ -201,7 +212,7 @@ mainloop:
 				var eie *ktypes.ExpiredIteratorException
 				if errors.As(err, &eie) {
 					k.config.logger.Log("Got error: %s %s %s", eie.ErrorCode(), eie.ErrorMessage(), origErrStr)
-					newIterator, ierr := getShardIterator(k.kinesis, k.streamName, shardID, lastSeqToCheckp, nil)
+					newIterator, ierr := getShardIterator(k.kinesis, k.streamName, shardID, lastSeqToCheckp, nil, k.config.iteratorType)
 					if ierr != nil {
 						k.shardErrors <- shardConsumerError{shardID: shardID, action: "getShardIterator", err: err}
 						return

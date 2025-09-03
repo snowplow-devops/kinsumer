@@ -2,11 +2,12 @@ package kinsumer
 
 import (
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -33,10 +34,13 @@ func TestShardConsumer(t *testing.T) {
 	err := setupTestEnvironment(t, k, dynamo, streamName, 1)
 	require.NoError(t, err, "Problems setting up the test environment")
 
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -74,10 +78,12 @@ func TestForcefulOwnershipChange(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(100 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	// Set vastly different max ages to synthetically create a forced ownership change
 	maxAge1 := 10 * time.Second
@@ -216,10 +222,12 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(100 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	// Set vastly different max ages to synthetically create a forced ownership change
 	maxAge1 := 10 * time.Second
@@ -229,7 +237,9 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 	config2 := config.WithClientRecordMaxAge(&maxAge2)
 
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config1)
+	require.NoError(t, err)
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config2)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -347,14 +357,19 @@ func TestShardsMerged(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(100 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	require.NoError(t, err)
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
+	require.NoError(t, err)
 	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -520,12 +535,15 @@ func TestConsumerStopStart(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(50 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -592,14 +610,19 @@ func TestMultipleConsumerStopStart(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(50 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	require.NoError(t, err)
 	kinsumer2, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_2", "", config)
+	require.NoError(t, err)
 	kinsumer3, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_3", "", config)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -715,12 +738,15 @@ func TestDelayedUpdateDuplicates(t *testing.T) {
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	// Create two kinsumer instances, but don't call run
-	config := NewConfig().WithBufferSize(1000)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(50 * time.Millisecond)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
 
 	kinsumer, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
+	require.NoError(t, err)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
