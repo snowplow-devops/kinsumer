@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/twitchscience/kinsumer/kinsumeriface"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -227,6 +228,17 @@ mainloop:
 
 		// Put all the records we got onto the channel
 		k.config.stats.EventsFromKinesis(len(records), shardID, lag)
+		atomic.AddInt64(&k.recordsInMemoryCount, int64(len(records)))
+		
+		// Track records for cleanup in case of early return
+		recordsToCleanup := int64(len(records))
+		defer func() {
+			// Decrement any records that weren't successfully processed
+			if recordsToCleanup > 0 {
+				atomic.AddInt64(&k.recordsInMemoryCount, -recordsToCleanup)
+			}
+		}()
+		
 		if len(records) > 0 {
 			retrievedAt := time.Now()
 			for _, record := range records {
@@ -250,6 +262,7 @@ mainloop:
 						checkpointer: checkpointer,
 						retrievedAt:  retrievedAt,
 					}:
+						recordsToCleanup-- // Record successfully sent to channel
 						checkpointer.lastRecordPassed = time.Now() // Mark the time so we don't retain shards when we're too slow to do so
 						lastSeqToCheckp = aws.ToString(record.SequenceNumber)
 						break RecordLoop
