@@ -65,6 +65,7 @@ type Kinsumer struct {
 	maxAgeForClientRecord time.Duration           // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
 	maxAgeForLeaderRecord time.Duration           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 	shardSemaphore        chan struct{}           // Semaphore to limit concurrent shard record fetching
+	recordsInMemoryCount  int64                   // Atomic counter for records pulled from Kinesis but not yet delivered to client
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
@@ -460,6 +461,7 @@ func (k *Kinsumer) Run() error {
 				if !k.config.manualCheckpointing {
 					record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 				}
+				atomic.AddInt64(&k.recordsInMemoryCount, -1)
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
@@ -487,8 +489,8 @@ func (k *Kinsumer) Run() error {
 					k.isRestartingConsumers = false
 				}
 			case <-bufferReportTicker.C:
-				// Report the current number of records buffered in memory
-				k.config.stats.RecordsInMemory(len(k.records))
+				// Report the current number of records pulled from Kinesis but not yet delivered to client
+				k.config.stats.RecordsInMemory(int(atomic.LoadInt64(&k.recordsInMemoryCount)))
 			}
 		}
 	}()
