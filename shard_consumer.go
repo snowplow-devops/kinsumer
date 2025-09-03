@@ -230,20 +230,32 @@ mainloop:
 		k.config.stats.EventsFromKinesis(len(records), shardID, lag)
 		atomic.AddInt64(&k.recordsInMemoryCount, int64(len(records)))
 		
+		// Calculate total payload bytes in the batch
+		totalBytes := int64(0)
+		for _, record := range records {
+			totalBytes += int64(len(record.Data))
+		}
+		atomic.AddInt64(&k.bytesInMemoryCount, totalBytes)
+		
 		// Track records for cleanup in case of early return
 		recordsToCleanup := int64(len(records))
+		bytesToCleanup := totalBytes
 		defer func() {
 			// Decrement any records that weren't successfully processed
 			if recordsToCleanup > 0 {
 				atomic.AddInt64(&k.recordsInMemoryCount, -recordsToCleanup)
+			}
+			if bytesToCleanup > 0 {
+				atomic.AddInt64(&k.bytesInMemoryCount, -bytesToCleanup)
 			}
 		}()
 		
 		if len(records) > 0 {
 			retrievedAt := time.Now()
 			for _, record := range records {
-			RecordLoop:
 				// Loop until we stop or the record is consumed, checkpointing if necessary.
+				recordPayloadBytes := int64(len(record.Data))
+			RecordLoop:
 				for {
 					select {
 					case <-commitTicker.C:
@@ -261,8 +273,10 @@ mainloop:
 						record:       &record,
 						checkpointer: checkpointer,
 						retrievedAt:  retrievedAt,
+						payloadBytes: recordPayloadBytes,
 					}:
 						recordsToCleanup-- // Record successfully sent to channel
+						bytesToCleanup -= recordPayloadBytes // Decrement bytes for successfully sent record
 						checkpointer.lastRecordPassed = time.Now() // Mark the time so we don't retain shards when we're too slow to do so
 						lastSeqToCheckp = aws.ToString(record.SequenceNumber)
 						break RecordLoop
