@@ -52,6 +52,11 @@ type Config struct {
 
 	// use ListShards to avoid LimitExceedException from DescribeStream
 	useListShardsForKinesisStreamReady bool
+
+	// Maximum number of records to fetch per GetRecords request
+	// AWS Kinesis allows up to 10,000 records per request (default)
+	// Reducing this value helps control memory usage at the cost of increased API calls
+	getRecordsLimit int
 }
 
 // NewConfig returns a default Config struct
@@ -67,6 +72,7 @@ func NewConfig() Config {
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
+		getRecordsLimit:       10000,
 	}
 }
 
@@ -157,6 +163,14 @@ func (c Config) WithUseListShardsForKinesisStreamReady(shouldUse bool) Config {
 	return c
 }
 
+// WithGetRecordsLimit returns a Config with a modified maximum records per GetRecords request
+// This controls how many records to fetch per GetRecords API call.
+// AWS Kinesis allows up to 10,000 records per request. Reducing this helps control memory usage.
+func (c Config) WithGetRecordsLimit(getRecordsLimit int) Config {
+	c.getRecordsLimit = getRecordsLimit
+	return c
+}
+
 // Verify that a config struct has sane and valid values
 func validateConfig(c *Config) error {
 	if c.throttleDelay < 200*time.Millisecond {
@@ -197,6 +211,10 @@ func validateConfig(c *Config) error {
 
 	if c.logger == nil {
 		return ErrConfigInvalidLogger
+	}
+
+	if c.getRecordsLimit <= 0 || c.getRecordsLimit > 10000 {
+		return ErrConfigInvalidGetRecordsLimit
 	}
 
 	return nil

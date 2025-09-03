@@ -15,12 +15,6 @@ import (
 	smithy "github.com/aws/smithy-go"
 )
 
-const (
-	// getRecordsLimit is the max number of records in a single request. This effectively limits the
-	// total processing speed to getRecordsLimit*5/n where n is the number of parallel clients trying
-	// to consume from the same kinesis stream
-	getRecordsLimit = 10000 // 10,000 is the max according to the docs
-)
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time) (string, error) {
@@ -54,9 +48,9 @@ func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID str
 }
 
 // getRecords returns the next records and shard iterator from the given shard iterator
-func getRecords(k kinsumeriface.KinesisAPI, iterator string) (records []ktypes.Record, nextIterator string, lag time.Duration, err error) {
+func getRecords(k kinsumeriface.KinesisAPI, iterator string, limit int) (records []ktypes.Record, nextIterator string, lag time.Duration, err error) {
 	params := &kinesis.GetRecordsInput{
-		Limit:         aws.Int32(getRecordsLimit),
+		Limit:         aws.Int32(int32(limit)),
 		ShardIterator: aws.String(iterator),
 	}
 
@@ -190,7 +184,7 @@ mainloop:
 		}
 
 		// Get records from kinesis
-		records, next, lag, err := getRecords(k.kinesis, iterator)
+		records, next, lag, err := getRecords(k.kinesis, iterator, k.config.getRecordsLimit)
 
 		if err != nil {
 			var ae smithy.APIError

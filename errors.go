@@ -38,6 +38,8 @@ var (
 	ErrConfigInvalidDynamoCapacity = errors.New("dynamo read/write capacity cannot be 0")
 	// ErrConfigInvalidLogger - Logger cannot be nil
 	ErrConfigInvalidLogger = errors.New("logger cannot be nil")
+	// ErrConfigInvalidGetRecordsLimit - getRecordsLimit must be between 1 and 10000
+	ErrConfigInvalidGetRecordsLimit = errors.New("getRecordsLimit must be between 1 and 10000")
 
 	// ErrStreamBusy - Stream is busy
 	ErrStreamBusy = errors.New("stream is busy")
