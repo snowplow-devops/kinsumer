@@ -42,12 +42,15 @@ const (
 	RecordsDecrement
 	BytesIncrement
 	BytesDecrement
+	CombinedDecrement
 )
 
 // MetricUpdate represents a single metric update to be processed
 type MetricUpdate struct {
-	Type  MetricType
-	Value int64
+	Type        MetricType
+	Value       int64
+	RecordsDelta int64 // For combined updates: change in records count
+	BytesDelta   int64 // For combined updates: change in bytes count
 }
 
 // MetricsManager handles metrics updates through channels to avoid atomic contention
@@ -86,6 +89,26 @@ func (mm *MetricsManager) updateMetric(t MetricType, value int64) {
 	}
 }
 
+// decrementCombined sends a combined decrement update for both records and bytes
+func (mm *MetricsManager) decrementCombined(recordsDelta, bytesDelta int64) {
+	select {
+	case mm.updates <- MetricUpdate{
+		Type:         CombinedDecrement,
+		RecordsDelta: recordsDelta,
+		BytesDelta:   bytesDelta,
+	}:
+		// Successfully queued
+	default:
+		// Channel full - drop metric to avoid blocking hot path
+		mm.dropCount++
+		if time.Since(mm.lastDropLogTime) > time.Minute {
+			mm.logger.Log("Warning: dropped %d metric updates in last minute due to full channel", mm.dropCount)
+			mm.dropCount = 0
+			mm.lastDropLogTime = time.Now()
+		}
+	}
+}
+
 // getCurrentMetrics returns current metric values using atomic loads
 func (mm *MetricsManager) getCurrentMetrics() (int64, int64) {
 	return atomic.LoadInt64(&mm.recordsCount), atomic.LoadInt64(&mm.bytesCount)
@@ -107,6 +130,9 @@ func (mm *MetricsManager) run() {
 				bytesCount += update.Value
 			case BytesDecrement:
 				bytesCount -= update.Value
+			case CombinedDecrement:
+				recordsCount -= update.RecordsDelta
+				bytesCount -= update.BytesDelta
 			}
 
 			// Update shared state - single writer, no contention
@@ -558,8 +584,7 @@ func (k *Kinsumer) Run() error {
 				if !k.config.manualCheckpointing {
 					record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 				}
-				k.metricsManager.updateMetric(RecordsDecrement, 1)
-				k.metricsManager.updateMetric(BytesDecrement, record.payloadBytes)
+				k.metricsManager.decrementCombined(1, record.payloadBytes)
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
