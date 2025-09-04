@@ -32,7 +32,7 @@ type StatReceiver interface {
 	// that have been pulled from Kinesis and are buffered in memory, waiting to be
 	// delivered to the client.
 	// `count` Current number of records in the internal buffer
-	RecordsInMemory(count int)
+	RecordsInMemory(count int64)
 
 	// RecordsInMemoryBytes is called periodically to report the current total bytes
 	// of record payloads that have been pulled from Kinesis and are buffered in memory,

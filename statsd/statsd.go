@@ -63,8 +63,8 @@ func (s *Statsd) EventsFromKinesis(num int, shardID string, lag time.Duration) {
 
 // RecordsInMemory implementation that writes to statsd a gauge metric about
 // the current number of records buffered in memory
-func (s *Statsd) RecordsInMemory(count int) {
-	_ = s.client.Gauge("kinsumer.records_in_memory", int64(count), 1.0)
+func (s *Statsd) RecordsInMemory(count int64) {
+	_ = s.client.Gauge("kinsumer.records_in_memory", count, 1.0)
 }
 
 // RecordsInMemoryBytes implementation that writes to statsd a gauge metric about
