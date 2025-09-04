@@ -183,6 +183,8 @@ type Kinsumer struct {
 	maxAgeForLeaderRecord time.Duration           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 	shardSemaphore        chan struct{}           // Semaphore to limit concurrent shard record fetching
 	metricsManager        *MetricsManager         // Channel-based metrics manager to avoid atomic contention
+	pendingRecords        int64                   // Accumulated record decrements for batching
+	pendingBytes          int64                   // Accumulated byte decrements for batching
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
@@ -535,6 +537,10 @@ func (k *Kinsumer) Run() error {
 			// Do this outside the k.isLeader check in case k.isLeader was false because
 			// we lost leadership but haven't had time to shutdown the goroutine yet.
 			k.leaderWG.Wait()
+			// Flush any remaining pending metrics before shutdown
+			if k.pendingRecords > 0 || k.pendingBytes > 0 {
+				k.metricsManager.decrementCombined(k.pendingRecords, k.pendingBytes)
+			}
 			// Shutdown metrics goroutine
 			k.metricsManager.shutdown()
 		}()
@@ -584,7 +590,13 @@ func (k *Kinsumer) Run() error {
 				if !k.config.manualCheckpointing {
 					record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 				}
-				k.metricsManager.decrementCombined(1, record.payloadBytes)
+				k.pendingRecords++
+				k.pendingBytes += record.payloadBytes
+				if k.pendingRecords >= 50 {
+					k.metricsManager.decrementCombined(k.pendingRecords, k.pendingBytes)
+					k.pendingRecords = 0
+					k.pendingBytes = 0
+				}
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
