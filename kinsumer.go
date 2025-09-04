@@ -52,17 +52,21 @@ type MetricUpdate struct {
 
 // MetricsManager handles metrics updates through channels to avoid atomic contention
 type MetricsManager struct {
-	updates      chan MetricUpdate
-	stop         chan struct{}
-	recordsCount int64 // Current records count - only written by metrics goroutine
-	bytesCount   int64 // Current bytes count - only written by metrics goroutine
+	updates         chan MetricUpdate
+	stop            chan struct{}
+	recordsCount    int64     // Current records count - only written by metrics goroutine
+	bytesCount      int64     // Current bytes count - only written by metrics goroutine
+	logger          Logger    // Logger for warnings and errors
+	lastDropLogTime time.Time // Last time we logged a drop warning
+	dropCount       int64     // Count of drops since last log
 }
 
 // newMetricsManager creates a new MetricsManager with buffered channel
-func newMetricsManager() *MetricsManager {
+func newMetricsManager(logger Logger) *MetricsManager {
 	return &MetricsManager{
 		updates: make(chan MetricUpdate, 50000), // Large buffer to handle bursts
 		stop:    make(chan struct{}),
+		logger:  logger,
 	}
 }
 
@@ -73,6 +77,12 @@ func (mm *MetricsManager) updateMetric(t MetricType, value int64) {
 		// Successfully queued
 	default:
 		// Channel full - drop metric to avoid blocking hot path
+		mm.dropCount++
+		if time.Since(mm.lastDropLogTime) > time.Minute {
+			mm.logger.Log("Warning: dropped %d metric updates in last minute due to full channel", mm.dropCount)
+			mm.dropCount = 0
+			mm.lastDropLogTime = time.Now()
+		}
 	}
 }
 
@@ -215,7 +225,7 @@ func NewWithInterfaces(
 		config:                config,
 		maxAgeForClientRecord: *config.clientRecordMaxAge,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
-		metricsManager:        newMetricsManager(),
+		metricsManager:        newMetricsManager(config.logger),
 	}
 
 	// Initialize semaphore for limiting concurrent shard record fetching
