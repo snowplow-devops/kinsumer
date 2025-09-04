@@ -19,7 +19,7 @@ func (*NoopStatReceiver) EventToClient(inserted, retrieved time.Time) {}
 func (*NoopStatReceiver) EventsFromKinesis(num int, shardID string, lag time.Duration) {}
 
 // RecordsInMemory implementation that doesn't do anything
-func (*NoopStatReceiver) RecordsInMemory(count int) {}
+func (*NoopStatReceiver) RecordsInMemory(count int64) {}
 
 // RecordsInMemoryBytes implementation that doesn't do anything
 func (*NoopStatReceiver) RecordsInMemoryBytes(bytes int64) {}

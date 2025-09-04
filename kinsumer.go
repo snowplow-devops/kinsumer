@@ -493,7 +493,7 @@ func (k *Kinsumer) Run() error {
 				}
 			case <-bufferReportTicker.C:
 				// Report the current number of records pulled from Kinesis but not yet delivered to client
-				k.config.stats.RecordsInMemory(int(atomic.LoadInt64(&k.recordsInMemoryCount)))
+				k.config.stats.RecordsInMemory(atomic.LoadInt64(&k.recordsInMemoryCount))
 				// Report the current total bytes of record payloads pulled from Kinesis but not yet delivered to client
 				k.config.stats.RecordsInMemoryBytes(atomic.LoadInt64(&k.bytesInMemoryCount))
 			}
