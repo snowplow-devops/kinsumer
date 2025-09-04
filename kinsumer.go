@@ -5,10 +5,11 @@ package kinsumer
 import (
 	"context"
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -47,27 +48,25 @@ const (
 
 // MetricUpdate represents a single metric update to be processed
 type MetricUpdate struct {
-	Type        MetricType
-	Value       int64
+	Type         MetricType
+	Value        int64
 	RecordsDelta int64 // For combined updates: change in records count
 	BytesDelta   int64 // For combined updates: change in bytes count
 }
 
 // MetricsManager handles metrics updates through channels to avoid atomic contention
 type MetricsManager struct {
-	updates         chan MetricUpdate
-	stop            chan struct{}
-	recordsCount    int64     // Current records count - only written by metrics goroutine
-	bytesCount      int64     // Current bytes count - only written by metrics goroutine
-	logger          Logger    // Logger for warnings and errors
-	lastDropLogTime time.Time // Last time we logged a drop warning
-	dropCount       int64     // Count of drops since last log
+	updates      chan MetricUpdate
+	stop         chan struct{}
+	recordsCount int64  // Current records count - only written by metrics goroutine
+	bytesCount   int64  // Current bytes count - only written by metrics goroutine
+	logger       Logger // Logger for warnings and errors
 }
 
 // newMetricsManager creates a new MetricsManager with buffered channel
 func newMetricsManager(logger Logger) *MetricsManager {
 	return &MetricsManager{
-		updates: make(chan MetricUpdate, 50000), // Large buffer to handle bursts
+		updates: make(chan MetricUpdate, 5000), // Buffer sized for batched writes
 		stop:    make(chan struct{}),
 		logger:  logger,
 	}
@@ -79,13 +78,8 @@ func (mm *MetricsManager) updateMetric(t MetricType, value int64) {
 	case mm.updates <- MetricUpdate{Type: t, Value: value}:
 		// Successfully queued
 	default:
-		// Channel full - drop metric to avoid blocking hot path
-		mm.dropCount++
-		if time.Since(mm.lastDropLogTime) > time.Minute {
-			mm.logger.Log("Warning: dropped %d metric updates in last minute due to full channel", mm.dropCount)
-			mm.dropCount = 0
-			mm.lastDropLogTime = time.Now()
-		}
+		// Channel full - log immediately since drops should be very rare with batching
+		mm.logger.Log("Warning: metrics channel full, dropping single metric update (type: %d, value: %d)", t, value)
 	}
 }
 
@@ -99,13 +93,8 @@ func (mm *MetricsManager) decrementCombined(recordsDelta, bytesDelta int64) {
 	}:
 		// Successfully queued
 	default:
-		// Channel full - drop metric to avoid blocking hot path
-		mm.dropCount++
-		if time.Since(mm.lastDropLogTime) > time.Minute {
-			mm.logger.Log("Warning: dropped %d metric updates in last minute due to full channel", mm.dropCount)
-			mm.dropCount = 0
-			mm.lastDropLogTime = time.Now()
-		}
+		// Channel full - log immediately since drops should be very rare with batching
+		mm.logger.Log("Warning: metrics channel full, dropping update with %d records, %d bytes", recordsDelta, bytesDelta)
 	}
 }
 
