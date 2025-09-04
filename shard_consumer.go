@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/twitchscience/kinsumer/kinsumeriface"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -228,14 +227,14 @@ mainloop:
 
 		// Put all the records we got onto the channel
 		k.config.stats.EventsFromKinesis(len(records), shardID, lag)
-		atomic.AddInt64(&k.recordsInMemoryCount, int64(len(records)))
+		k.metricsManager.updateMetric(RecordsIncrement, int64(len(records)))
 		
 		// Calculate total payload bytes in the batch
 		totalBytes := int64(0)
 		for _, record := range records {
 			totalBytes += int64(len(record.Data))
 		}
-		atomic.AddInt64(&k.bytesInMemoryCount, totalBytes)
+		k.metricsManager.updateMetric(BytesIncrement, totalBytes)
 		
 		// Track records for cleanup in case of early return
 		recordsToCleanup := int64(len(records))
@@ -243,10 +242,10 @@ mainloop:
 		defer func() {
 			// Decrement any records that weren't successfully processed
 			if recordsToCleanup > 0 {
-				atomic.AddInt64(&k.recordsInMemoryCount, -recordsToCleanup)
+				k.metricsManager.updateMetric(RecordsDecrement, recordsToCleanup)
 			}
 			if bytesToCleanup > 0 {
-				atomic.AddInt64(&k.bytesInMemoryCount, -bytesToCleanup)
+				k.metricsManager.updateMetric(BytesDecrement, bytesToCleanup)
 			}
 		}()
 		

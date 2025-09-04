@@ -34,6 +34,86 @@ type consumedRecord struct {
 	payloadBytes int64          // Size of record.Data payload in bytes
 }
 
+// MetricType represents the type of metric update
+type MetricType int
+
+const (
+	RecordsIncrement MetricType = iota
+	RecordsDecrement
+	BytesIncrement
+	BytesDecrement
+)
+
+// MetricUpdate represents a single metric update to be processed
+type MetricUpdate struct {
+	Type  MetricType
+	Value int64
+}
+
+// MetricsManager handles metrics updates through channels to avoid atomic contention
+type MetricsManager struct {
+	updates      chan MetricUpdate
+	stop         chan struct{}
+	recordsCount int64 // Current records count - only written by metrics goroutine
+	bytesCount   int64 // Current bytes count - only written by metrics goroutine
+}
+
+// newMetricsManager creates a new MetricsManager with buffered channel
+func newMetricsManager() *MetricsManager {
+	return &MetricsManager{
+		updates: make(chan MetricUpdate, 50000), // Large buffer to handle bursts
+		stop:    make(chan struct{}),
+	}
+}
+
+// updateMetric sends a non-blocking metric update
+func (mm *MetricsManager) updateMetric(t MetricType, value int64) {
+	select {
+	case mm.updates <- MetricUpdate{Type: t, Value: value}:
+		// Successfully queued
+	default:
+		// Channel full - drop metric to avoid blocking hot path
+	}
+}
+
+// getCurrentMetrics returns current metric values using atomic loads
+func (mm *MetricsManager) getCurrentMetrics() (int64, int64) {
+	return atomic.LoadInt64(&mm.recordsCount), atomic.LoadInt64(&mm.bytesCount)
+}
+
+// run processes metric updates in a separate goroutine
+func (mm *MetricsManager) run() {
+	var recordsCount, bytesCount int64
+
+	for {
+		select {
+		case update := <-mm.updates:
+			switch update.Type {
+			case RecordsIncrement:
+				recordsCount += update.Value
+			case RecordsDecrement:
+				recordsCount -= update.Value
+			case BytesIncrement:
+				bytesCount += update.Value
+			case BytesDecrement:
+				bytesCount -= update.Value
+			}
+
+			// Update shared state - single writer, no contention
+			atomic.StoreInt64(&mm.recordsCount, recordsCount)
+			atomic.StoreInt64(&mm.bytesCount, bytesCount)
+
+		case <-mm.stop:
+			return
+		}
+	}
+}
+
+// shutdown stops the metrics goroutine
+func (mm *MetricsManager) shutdown() {
+	close(mm.stop)
+}
+
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple
 // clients each processing multiple shards
 type Kinsumer struct {
@@ -66,8 +146,7 @@ type Kinsumer struct {
 	maxAgeForClientRecord time.Duration           // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
 	maxAgeForLeaderRecord time.Duration           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 	shardSemaphore        chan struct{}           // Semaphore to limit concurrent shard record fetching
-	recordsInMemoryCount  int64                   // Atomic counter for records pulled from Kinesis but not yet delivered to client
-	bytesInMemoryCount    int64                   // Atomic counter for payload bytes pulled from Kinesis but not yet delivered to client
+	metricsManager        *MetricsManager         // Channel-based metrics manager to avoid atomic contention
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
@@ -136,6 +215,7 @@ func NewWithInterfaces(
 		config:                config,
 		maxAgeForClientRecord: *config.clientRecordMaxAge,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
+		metricsManager:        newMetricsManager(),
 	}
 
 	// Initialize semaphore for limiting concurrent shard record fetching
@@ -401,6 +481,9 @@ func (k *Kinsumer) Run() error {
 		return fmt.Errorf("error in kinsumer Run initial refreshShards: %v", err)
 	}
 
+	// Start metrics goroutine
+	go k.metricsManager.run()
+
 	k.mainWG.Add(1)
 	go func() {
 		defer k.mainWG.Done()
@@ -416,6 +499,8 @@ func (k *Kinsumer) Run() error {
 			// Do this outside the k.isLeader check in case k.isLeader was false because
 			// we lost leadership but haven't had time to shutdown the goroutine yet.
 			k.leaderWG.Wait()
+			// Shutdown metrics goroutine
+			k.metricsManager.shutdown()
 		}()
 
 		// We close k.output so that Next() stops, this is also the reason
@@ -463,8 +548,8 @@ func (k *Kinsumer) Run() error {
 				if !k.config.manualCheckpointing {
 					record.checkpointer.update(aws.ToString(record.record.SequenceNumber))
 				}
-				atomic.AddInt64(&k.recordsInMemoryCount, -1)
-				atomic.AddInt64(&k.bytesInMemoryCount, -record.payloadBytes)
+				k.metricsManager.updateMetric(RecordsDecrement, 1)
+				k.metricsManager.updateMetric(BytesDecrement, record.payloadBytes)
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
@@ -493,9 +578,10 @@ func (k *Kinsumer) Run() error {
 				}
 			case <-bufferReportTicker.C:
 				// Report the current number of records pulled from Kinesis but not yet delivered to client
-				k.config.stats.RecordsInMemory(atomic.LoadInt64(&k.recordsInMemoryCount))
+				recordsCount, bytesCount := k.metricsManager.getCurrentMetrics()
+				k.config.stats.RecordsInMemory(recordsCount)
 				// Report the current total bytes of record payloads pulled from Kinesis but not yet delivered to client
-				k.config.stats.RecordsInMemoryBytes(atomic.LoadInt64(&k.bytesInMemoryCount))
+				k.config.stats.RecordsInMemoryBytes(bytesCount)
 			}
 		}
 	}()
