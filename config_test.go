@@ -52,6 +52,10 @@ func TestConfigErrors(t *testing.T) {
 	config = NewConfig().WithStats(nil)
 	err = validateConfig(&config)
 	require.EqualError(t, err, ErrConfigInvalidStats.Error())
+
+	config = NewConfig().WithMaxConcurrentShards(-1)
+	err = validateConfig(&config)
+	require.EqualError(t, err, ErrConfigInvalidMaxConcurrentShards.Error())
 }
 
 func TestConfigWithMethods(t *testing.T) {
@@ -65,7 +69,8 @@ func TestConfigWithMethods(t *testing.T) {
 		WithThrottleDelay(1 * time.Second).
 		WithStats(stats).
 		WithIteratorStartTimestamp(&tstamp).
-		WithUseListShardsForKinesisStreamReady(true)
+		WithUseListShardsForKinesisStreamReady(true).
+		WithMaxConcurrentShards(10)
 
 	err := validateConfig(&config)
 	require.NoError(t, err)
@@ -78,4 +83,5 @@ func TestConfigWithMethods(t *testing.T) {
 	require.Equal(t, stats, config.stats)
 	require.Equal(t, &tstamp, config.iteratorStartTimestamp)
 	require.Equal(t, true, config.useListShardsForKinesisStreamReady)
+	require.Equal(t, 10, config.maxConcurrentShards)
 }
