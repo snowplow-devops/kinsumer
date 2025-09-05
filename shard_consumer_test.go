@@ -2,13 +2,17 @@ package kinsumer
 
 import (
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/twitchscience/kinsumer/kinsumeriface"
+	"github.com/twitchscience/kinsumer/mocks"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 
@@ -1001,4 +1005,396 @@ func TestGetDupesFromSlice(t *testing.T) {
 
 	dupes2 := getDupesFromSlice(sliceWithoutDupes)
 	assert.Equal(t, 0, len(dupes2))
+}
+
+// TestMaxConcurrentShards tests the maxConcurrentShards feature using MockKinesis
+// to verify that semaphore properly limits concurrent shard record fetching
+func TestMaxConcurrentShards(t *testing.T) {
+
+	// Test setup: Create 5 mock shards with concurrency limit of 2
+	shardIDs := []string{"shard-001", "shard-002", "shard-003", "shard-004", "shard-005"}
+	mockKinesis := mocks.NewMockKinesis(shardIDs)
+
+	// Create MockDynamo with proper table names (applicationName + "_" + table_type)
+	mockDynamo := mocks.NewMockDynamo([]string{"test-app_checkpoints", "test-app_clients", "test-app_metadata"})
+
+	// Pre-populate checkpoint records for each shard (unowned so they can be captured)
+	for _, shardID := range shardIDs {
+		checkpointItem := map[string]dbtypes.AttributeValue{
+			"Shard":          &dbtypes.AttributeValueMemberS{Value: shardID},
+			"SequenceNumber": &dbtypes.AttributeValueMemberS{Value: ""},  // Start from beginning
+			"LastUpdate":     &dbtypes.AttributeValueMemberN{Value: "0"}, // Old timestamp = unowned
+			// OwnerName and OwnerID are nil (unowned)
+			// Finished is nil (active shard)
+		}
+		_, err := mockDynamo.PutItem(t.Context(), &dynamodb.PutItemInput{
+			TableName: aws.String("test-app_checkpoints"),
+			Item:      checkpointItem,
+		})
+		require.NoError(t, err, "Failed to populate checkpoint for shard %s", shardID)
+	}
+
+	// Set a delay to make concurrent behavior observable
+	mockKinesis.SetDelay(100 * time.Millisecond)
+
+	// Test with concurrency limit
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond).
+		WithMaxConcurrentShards(2) // Limit to 2 concurrent shards
+
+	kinsumer, err := NewWithInterfaces(mockKinesis, mockDynamo, "test-stream", "test-app", "test-client", "", config)
+	require.NoError(t, err, "Failed to create kinsumer with concurrency limit")
+
+	// Initialize channels that consume() expects to exist
+	kinsumer.stop = make(chan struct{})
+	kinsumer.shardErrors = make(chan shardConsumerError, 10)
+	kinsumer.records = make(chan *consumedRecord, 1000)
+
+	// Manually start consuming each shard
+	var wg sync.WaitGroup
+	for _, shardID := range shardIDs {
+		wg.Add(1)
+		go func(shard string) {
+			defer wg.Done()
+			kinsumer.waitGroup.Add(1) // consume() expects this
+			kinsumer.consume(shard)
+		}(shardID)
+	}
+
+	// Wait a moment for consumers to start up and begin processing
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify that we reach the expected concurrency level (2)
+	success := mockKinesis.WaitForConcurrentCalls(2, 2*time.Second)
+	assert.True(t, success, "Expected to reach 2 concurrent calls")
+
+	// Let it run for a bit to collect data
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify concurrency never exceeded the limit
+	maxConcurrent := mockKinesis.GetMaxConcurrentCalls()
+	assert.LessOrEqual(t, maxConcurrent, 2, "Concurrent calls should never exceed limit of 2, got %d", maxConcurrent)
+
+	// Verify we got some calls (processing is happening)
+	totalCalls := mockKinesis.GetTotalCalls()
+	assert.Greater(t, totalCalls, 5, "Should have made multiple GetRecords calls, got %d", totalCalls)
+
+	// Stop consumers
+	close(kinsumer.stop)
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	t.Logf("Max concurrent calls observed: %d (limit was 2)", maxConcurrent)
+	t.Logf("Total GetRecords calls made: %d", totalCalls)
+}
+
+// TestMaxConcurrentShardsUnlimited tests that maxConcurrentShards=0 means unlimited
+func TestMaxConcurrentShardsUnlimited(t *testing.T) {
+
+	// Test setup: Create 5 mock shards with no concurrency limit
+	shardIDs := []string{"shard-001", "shard-002", "shard-003", "shard-004", "shard-005"}
+	mockKinesis := mocks.NewMockKinesis(shardIDs)
+
+	// Create MockDynamo with proper table names (applicationName + "_" + table_type)
+	mockDynamo := mocks.NewMockDynamo([]string{"test-app_checkpoints", "test-app_clients", "test-app_metadata"})
+
+	// Pre-populate checkpoint records for each shard (unowned so they can be captured)
+	for _, shardID := range shardIDs {
+		checkpointItem := map[string]dbtypes.AttributeValue{
+			"Shard":          &dbtypes.AttributeValueMemberS{Value: shardID},
+			"SequenceNumber": &dbtypes.AttributeValueMemberS{Value: ""},  // Start from beginning
+			"LastUpdate":     &dbtypes.AttributeValueMemberN{Value: "0"}, // Old timestamp = unowned
+			// OwnerName and OwnerID are nil (unowned)
+			// Finished is nil (active shard)
+		}
+		_, err := mockDynamo.PutItem(t.Context(), &dynamodb.PutItemInput{
+			TableName: aws.String("test-app_checkpoints"),
+			Item:      checkpointItem,
+		})
+		require.NoError(t, err, "Failed to populate checkpoint for shard %s", shardID)
+	}
+
+	// Set a delay to make concurrent behavior observable
+	mockKinesis.SetDelay(100 * time.Millisecond)
+
+	// Test with unlimited concurrency (default)
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond)
+		// maxConcurrentShards defaults to 0 (unlimited)
+
+	kinsumer, err := NewWithInterfaces(mockKinesis, mockDynamo, "test-stream", "test-app", "test-client", "", config)
+	require.NoError(t, err, "Failed to create kinsumer without concurrency limit")
+
+	// Initialize channels that consume() expects to exist
+	kinsumer.stop = make(chan struct{})
+	kinsumer.shardErrors = make(chan shardConsumerError, 10)
+	kinsumer.records = make(chan *consumedRecord, 1000)
+
+	// Manually start consuming each shard
+	var wg sync.WaitGroup
+	for _, shardID := range shardIDs {
+		wg.Add(1)
+		go func(shard string) {
+			defer wg.Done()
+			kinsumer.waitGroup.Add(1) // consume() expects this
+			kinsumer.consume(shard)
+		}(shardID)
+	}
+
+	// Wait a moment for consumers to start up
+	time.Sleep(50 * time.Millisecond)
+
+	// With unlimited concurrency, we should be able to reach all 5 concurrent calls
+	success := mockKinesis.WaitForConcurrentCalls(5, 2*time.Second)
+	assert.True(t, success, "Expected to reach 5 concurrent calls with unlimited setting")
+
+	// Let it run for a bit
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify we can process all shards concurrently
+	maxConcurrent := mockKinesis.GetMaxConcurrentCalls()
+	assert.Equal(t, 5, maxConcurrent, "Should allow all 5 shards to process concurrently, got %d", maxConcurrent)
+
+	// Stop consumers
+	close(kinsumer.stop)
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	t.Logf("Max concurrent calls observed: %d (should be 5 with unlimited)", maxConcurrent)
+	t.Logf("Total GetRecords calls made: %d", mockKinesis.GetTotalCalls())
+}
+
+// TestProcessRecordsBatchSemaphoreAllPaths is a focused unit test that directly tests
+// the semaphore behavior in processRecordsBatch() for all possible code paths
+func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
+
+	// Configuration for checkpointer setup
+	type checkpointerConfig struct {
+		tableName           string
+		finished            bool
+		finalSequenceNumber string
+	}
+
+	// Helper to inspect semaphore state directly
+	getSemaphoreUsed := func(sem chan struct{}) int {
+		if sem == nil {
+			return 0
+		}
+		return len(sem)
+	}
+
+	// Helper to create kinsumer with test-specific configuration
+	createTestKinsumer := func(semaphore chan struct{}, stopChan chan struct{}, recordsChan chan *consumedRecord) *Kinsumer {
+		return &Kinsumer{
+			kinesis:        nil, // Will be set by caller
+			shardSemaphore: semaphore,
+			records:        recordsChan,
+			config:         NewConfig().WithMaxConcurrentShards(1),
+			metricsManager: newMetricsManager(&DefaultLogger{}),
+			stop:           stopChan,
+		}
+	}
+
+	// Helper to create checkpointer and ticker with test-specific configuration
+	createCheckpointerAndTicker := func(config checkpointerConfig, tickerInterval time.Duration) (*checkpointer, *time.Ticker) {
+		mockDynamo := mocks.NewMockDynamo([]string{"test-table"})
+
+		checkpointer := &checkpointer{
+			sequenceNumber:      "",
+			shardID:             "test-shard",
+			tableName:           config.tableName,
+			dynamodb:            mockDynamo,
+			ownerName:           "test-owner",
+			ownerID:             "test-owner-id",
+			stats:               &NoopStatReceiver{},
+			lastUpdate:          time.Now().UnixNano(),
+			finished:            config.finished,
+			finalSequenceNumber: config.finalSequenceNumber,
+		}
+
+		ticker := time.NewTicker(tickerInterval)
+
+		return checkpointer, ticker
+	}
+
+	// Test cases covering all processRecordsBatch code paths
+	testCases := []struct {
+		name               string
+		setupMock          func(*mocks.MockKinesis)
+		expectError        bool
+		description        string
+		stopChan           chan struct{}
+		recordsChan        chan *consumedRecord
+		tickerInterval     time.Duration
+		checkpointerConfig checkpointerConfig
+		runStopGoroutine   bool
+	}{
+		{
+			name:               "normal_success",
+			setupMock:          func(mk *mocks.MockKinesis) {}, // Default behavior - returns records
+			expectError:        false,
+			description:        "Normal processing should acquire and release semaphore",
+			stopChan:           nil,                             // No stop channel needed
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   false,
+		},
+		{
+			name: "getRecords_error",
+			setupMock: func(mk *mocks.MockKinesis) {
+				mk.SetGenericError("test-shard") // Will return generic error (not ExpiredIteratorException)
+			},
+			expectError:        true,
+			description:        "GetRecords error should still release semaphore via defer",
+			stopChan:           nil,                             // No stop channel needed
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   false,
+		},
+		{
+			name: "no_records_returned",
+			setupMock: func(mk *mocks.MockKinesis) {
+				mk.SetEmptyRecords("test-shard") // Return empty records array
+			},
+			expectError:        false,
+			description:        "No records returned should still release semaphore",
+			stopChan:           nil,                             // No stop channel needed
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   false,
+		},
+		{
+			name: "expired_iterator_getShardIterator_succeeds",
+			setupMock: func(mk *mocks.MockKinesis) {
+				mk.SetError("test-shard", true) // Return ExpiredIteratorException, but GetShardIterator will succeed
+			},
+			expectError:        false, // batchContinue, not error
+			description:        "ExpiredIteratorException with successful getShardIterator should release semaphore",
+			stopChan:           nil,                             // No stop channel needed
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   false,
+		},
+		{
+			name: "expired_iterator_getShardIterator_fails",
+			setupMock: func(mk *mocks.MockKinesis) {
+				mk.SetBothGetRecordsAndGetShardIteratorErrors("test-shard") // Both GetRecords and GetShardIterator fail
+			},
+			expectError:        true, // batchError when getShardIterator fails
+			description:        "ExpiredIteratorException with failed getShardIterator should release semaphore",
+			stopChan:           nil,                             // No stop channel needed
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   false,
+		},
+		{
+			name: "stop_signal_received",
+			setupMock: func(mk *mocks.MockKinesis) {
+				// Keep default behavior - return records so we enter the RecordLoop
+			},
+			expectError:        false, // batchBreak, not error
+			description:        "Stop signal during record processing should release semaphore",
+			stopChan:           make(chan struct{}),             // Need stop channel
+			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
+			tickerInterval:     100 * time.Millisecond,
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
+			runStopGoroutine:   true,
+		},
+		{
+			name: "commit_ticker_fires_commit_fails",
+			setupMock: func(mk *mocks.MockKinesis) {
+				// Keep default behavior - return records so we enter the RecordLoop
+			},
+			expectError:        true, // batchError when commit fails
+			description:        "Commit ticker fires and commit fails should release semaphore",
+			stopChan:           nil,                                                                                      // No stop channel needed
+			recordsChan:        make(chan *consumedRecord),                                                               // Unbuffered - will block record sending to force commit ticker
+			tickerInterval:     1 * time.Millisecond,                                                                     // Fast ticker
+			checkpointerConfig: checkpointerConfig{tableName: "error-trigger", finished: false, finalSequenceNumber: ""}, // Trigger error
+			runStopGoroutine:   false,
+		},
+		{
+			name: "commit_ticker_fires_commit_succeeds_finished",
+			setupMock: func(mk *mocks.MockKinesis) {
+				// Keep default behavior - return records so we enter the RecordLoop
+			},
+			expectError:        false, // batchSuccess when commit succeeds with finishCommitted=true
+			description:        "Commit ticker fires and commit succeeds with finishCommitted should release semaphore",
+			stopChan:           nil,                                                                                  // No stop channel needed
+			recordsChan:        make(chan *consumedRecord),                                                           // Unbuffered - will block record sending to force commit ticker
+			tickerInterval:     1 * time.Millisecond,                                                                 // Fast ticker
+			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: true, finalSequenceNumber: ""}, // Force finishCommitted=true
+			runStopGoroutine:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Minimal setup - only what processRecordsBatch needs
+			semaphore := make(chan struct{}, 1) // Capacity of 1 for easy verification
+			mockKinesis := mocks.NewMockKinesis([]string{"test-shard"})
+
+			// Apply test-specific mock setup
+			tc.setupMock(mockKinesis)
+
+			// Create kinsumer with test-specific configuration
+			kinsumer := createTestKinsumer(semaphore, tc.stopChan, tc.recordsChan)
+			kinsumer.kinesis = mockKinesis // Set the mock kinesis
+
+			// Create checkpointer and ticker with test-specific configuration
+			mockCheckpointer, ticker := createCheckpointerAndTicker(tc.checkpointerConfig, tc.tickerInterval)
+			defer ticker.Stop()
+
+			lastSeq := ""
+			lastSeqNum := ""
+
+			// Verify semaphore starts empty
+			before := getSemaphoreUsed(semaphore)
+			assert.Equal(t, 0, before, "Semaphore should start empty")
+
+			// For stop signal test, close the stop channel after a delay to trigger batchBreak
+			if tc.runStopGoroutine && tc.stopChan != nil {
+				go func() {
+					time.Sleep(10 * time.Millisecond) // Small delay to let processing start
+					close(tc.stopChan)
+				}()
+			}
+
+			// Call processRecordsBatch directly - this is where semaphore logic lives
+			iterator := "iter-test-shard-0" // Use format that MockKinesis expects
+			_, result, err := kinsumer.processRecordsBatch(iterator, "test-shard", mockCheckpointer, &lastSeq, &lastSeqNum, ticker)
+
+			// Verify semaphore is released regardless of success or error
+			after := getSemaphoreUsed(semaphore)
+			assert.Equal(t, 0, after, "Semaphore should be released for case: %s - %s", tc.name, tc.description)
+
+			// Verify expected error behavior
+			if tc.expectError {
+				assert.Equal(t, batchError, result, "Expected batchError result for %s", tc.name)
+				assert.Error(t, err, "Expected error for %s", tc.name)
+			} else {
+				assert.NoError(t, err, "Expected no error for %s", tc.name)
+				assert.NotEqual(t, batchError, result, "Expected non-error result for %s", tc.name)
+			}
+
+			// Verify MockKinesis saw exactly one call
+			totalCalls := mockKinesis.GetTotalCalls()
+			assert.Equal(t, 1, totalCalls, "Expected exactly 1 GetRecords call for %s", tc.name)
+
+			t.Logf("✓ %s: Semaphore properly released (before=%d, after=%d)", tc.description, before, after)
+		})
+	}
 }
