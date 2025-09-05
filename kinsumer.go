@@ -64,6 +64,7 @@ type Kinsumer struct {
 	leaderWG              sync.WaitGroup          // waitGroup for the leader loop
 	maxAgeForClientRecord time.Duration           // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
 	maxAgeForLeaderRecord time.Duration           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
+	shardSemaphore        chan struct{}           // Semaphore to limit concurrent shard record fetching
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
@@ -132,6 +133,11 @@ func NewWithInterfaces(
 		config:                config,
 		maxAgeForClientRecord: *config.clientRecordMaxAge,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
+	}
+
+	// Initialize semaphore for limiting concurrent shard record fetching
+	if config.maxConcurrentShards > 0 {
+		consumer.shardSemaphore = make(chan struct{}, config.maxConcurrentShards)
 	}
 	return consumer, nil
 }
