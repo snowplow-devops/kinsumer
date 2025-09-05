@@ -194,6 +194,18 @@ mainloop:
 			continue mainloop
 		}
 
+		// Acquire semaphore to limit concurrent shard record fetching
+		if k.shardSemaphore != nil {
+			k.shardSemaphore <- struct{}{} // May block if limit reached
+		}
+
+		// Helper function for safe semaphore release
+		releaseSemaphore := func() {
+			if k.shardSemaphore != nil {
+				<-k.shardSemaphore
+			}
+		}
+
 		// Get records from kinesis
 		records, next, lag, err := getRecords(k.kinesis, iterator, k.config.getRecordsLimit)
 
@@ -208,15 +220,18 @@ mainloop:
 					k.config.logger.Log("Got error: %s %s %s", eie.ErrorCode(), eie.ErrorMessage(), origErrStr)
 					newIterator, ierr := getShardIterator(k.kinesis, k.streamName, shardID, lastSeqToCheckp, nil, k.config.iteratorType)
 					if ierr != nil {
+						releaseSemaphore()
 						k.shardErrors <- shardConsumerError{shardID: shardID, action: "getShardIterator", err: err}
 						return
 					}
 					iterator = newIterator
 
 					// retry infinitely after expired iterator is renewed successfully
+					releaseSemaphore()
 					continue mainloop
 				}
 			}
+			releaseSemaphore()
 			k.shardErrors <- shardConsumerError{shardID: shardID, action: "getRecords", err: err}
 			return
 		}
@@ -256,6 +271,9 @@ mainloop:
 			// Update the last sequence number we saw, in case we reached the end of the stream.
 			lastSeqNum = aws.ToString(records[len(records)-1].SequenceNumber)
 		}
+		
+		// Release semaphore after successfully processing all records from this batch
+		releaseSemaphore()
 		iterator = next
 	}
 	// Handle checkpointer updates which occur after a stop request comes in (whose originating records were before)

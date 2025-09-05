@@ -44,6 +44,8 @@ var (
 	ErrConfigInvalidIteratorTimestamp = errors.New("iteratorType AT_TIMESTAMP requires iteratorStartTimestamp to be set")
 	// ErrConfigInvalidGetRecordsLimit - getRecordsLimit must be between 1 and 10000
 	ErrConfigInvalidGetRecordsLimit = errors.New("getRecordsLimit must be between 1 and 10000")
+	// ErrConfigInvalidMaxConcurrentShards - maxConcurrentShards must be >= 0
+	ErrConfigInvalidMaxConcurrentShards = errors.New("maxConcurrentShards must be >= 0")
 
 	// ErrStreamBusy - Stream is busy
 	ErrStreamBusy = errors.New("stream is busy")
