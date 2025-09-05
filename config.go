@@ -57,6 +57,14 @@ type Config struct {
 	// AWS Kinesis allows up to 10,000 records per request (default)
 	// Reducing this value helps control memory usage at the cost of increased API calls
 	getRecordsLimit int
+	// ---------- [ Memory Management ] ----------
+	// Maximum number of shards that can fetch records from Kinesis concurrently
+	// 0 (default) means unlimited concurrent shards
+	// Setting this helps prevent memory exhaustion during scaling events when a single
+	// client temporarily handles many shards. With random data distribution across shards,
+	// this provides natural fairness over time while controlling peak memory usage.
+	// Example: Setting to 20 limits memory to ~20 * 10k records * avg_record_size
+	maxConcurrentShards int
 }
 
 // NewConfig returns a default Config struct
@@ -171,6 +179,15 @@ func (c Config) WithGetRecordsLimit(getRecordsLimit int) Config {
 	return c
 }
 
+// WithMaxConcurrentShards returns a Config with a modified maximum concurrent shard limit
+// This controls how many shards can fetch records from Kinesis simultaneously.
+// Setting this helps prevent memory pressure during scaling events.
+// 0 (default) means unlimited concurrent shards.
+func (c Config) WithMaxConcurrentShards(maxConcurrentShards int) Config {
+	c.maxConcurrentShards = maxConcurrentShards
+	return c
+}
+
 // Verify that a config struct has sane and valid values
 func validateConfig(c *Config) error {
 	if c.throttleDelay < 200*time.Millisecond {
@@ -215,6 +232,9 @@ func validateConfig(c *Config) error {
 
 	if c.getRecordsLimit <= 0 || c.getRecordsLimit > 10000 {
 		return ErrConfigInvalidGetRecordsLimit
+	}
+	if c.maxConcurrentShards < 0 {
+		return ErrConfigInvalidMaxConcurrentShards
 	}
 
 	return nil
