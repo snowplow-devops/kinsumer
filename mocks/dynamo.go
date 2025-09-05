@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"testing"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/twitchscience/kinsumer/kinsumeriface"
-	"testing"
 )
 
 var (
@@ -51,6 +53,9 @@ type mockDynamoCallRecord struct {
 type MockDynamo struct {
 	kinsumeriface.DynamoDBAPI
 
+	// Thread safety
+	mu sync.Mutex
+
 	// Stored data
 	tables map[string][]mockDynamoItem
 
@@ -75,6 +80,8 @@ func (d *MockDynamo) addTable(name string) {
 }
 
 func (d *MockDynamo) recordCall(operation string, in, out interface{}, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.requests = append(d.requests, mockDynamoCallRecord{
 		operation: operation,
 		input:     in,
@@ -96,6 +103,9 @@ func (d *MockDynamo) PutItem(ctx context.Context, in *dynamodb.PutItemInput, opt
 	if aws.ToString(in.TableName) == mockDynamoErrorTrigger {
 		return nil, errInternalError()
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	tableName := aws.ToString(in.TableName)
 	if _, ok := d.tables[tableName]; !ok {
@@ -132,6 +142,9 @@ func (d *MockDynamo) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opt
 	if aws.ToString(in.TableName) == mockDynamoErrorTrigger {
 		return nil, errInternalError()
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	tableName := aws.ToString(in.TableName)
 	if _, ok := d.tables[tableName]; !ok {
