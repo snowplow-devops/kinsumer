@@ -365,7 +365,7 @@ func TestShardsMerged(t *testing.T) {
 		WithShardCheckFrequency(500 * time.Millisecond).
 		WithLeaderActionFrequency(500 * time.Millisecond).
 		WithCommitFrequency(100 * time.Millisecond).
-		WithIteratorType(types.ShardIteratorTypeTrimHorizon)
+		WithIteratorType(types.ShardIteratorTypeLatest)
 
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 	require.NoError(t, err)
@@ -1200,14 +1200,14 @@ func TestMaxConcurrentShardsUnlimited(t *testing.T) {
 // TestProcessRecordsBatchSemaphoreAllPaths is a focused unit test that directly tests
 // the semaphore behavior in processRecordsBatch() for all possible code paths
 func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
-	
+
 	// Configuration for checkpointer setup
 	type checkpointerConfig struct {
 		tableName           string
 		finished            bool
 		finalSequenceNumber string
 	}
-	
+
 	// Helper to inspect semaphore state directly
 	getSemaphoreUsed := func(sem chan struct{}) int {
 		if sem == nil {
@@ -1215,7 +1215,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 		}
 		return len(sem)
 	}
-	
+
 	// Helper to create kinsumer with test-specific configuration
 	createTestKinsumer := func(semaphore chan struct{}, stopChan chan struct{}, recordsChan chan *consumedRecord) *Kinsumer {
 		return &Kinsumer{
@@ -1227,11 +1227,11 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			stop:           stopChan,
 		}
 	}
-	
+
 	// Helper to create checkpointer and ticker with test-specific configuration
 	createCheckpointerAndTicker := func(config checkpointerConfig, tickerInterval time.Duration) (*checkpointer, *time.Ticker) {
 		mockDynamo := mocks.NewMockDynamo([]string{"test-table"})
-		
+
 		checkpointer := &checkpointer{
 			sequenceNumber:      "",
 			shardID:             "test-shard",
@@ -1244,30 +1244,30 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			finished:            config.finished,
 			finalSequenceNumber: config.finalSequenceNumber,
 		}
-		
+
 		ticker := time.NewTicker(tickerInterval)
-		
+
 		return checkpointer, ticker
 	}
-	
+
 	// Test cases covering all processRecordsBatch code paths
 	testCases := []struct {
-		name                 string
-		setupMock            func(*mocks.MockKinesis)
-		expectError          bool
-		description          string
-		stopChan             chan struct{}
-		recordsChan          chan *consumedRecord
-		tickerInterval       time.Duration
-		checkpointerConfig   checkpointerConfig
-		runStopGoroutine     bool
+		name               string
+		setupMock          func(*mocks.MockKinesis)
+		expectError        bool
+		description        string
+		stopChan           chan struct{}
+		recordsChan        chan *consumedRecord
+		tickerInterval     time.Duration
+		checkpointerConfig checkpointerConfig
+		runStopGoroutine   bool
 	}{
 		{
 			name:               "normal_success",
 			setupMock:          func(mk *mocks.MockKinesis) {}, // Default behavior - returns records
 			expectError:        false,
 			description:        "Normal processing should acquire and release semaphore",
-			stopChan:           nil, // No stop channel needed
+			stopChan:           nil,                             // No stop channel needed
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1280,7 +1280,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        true,
 			description:        "GetRecords error should still release semaphore via defer",
-			stopChan:           nil, // No stop channel needed
+			stopChan:           nil,                             // No stop channel needed
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1293,7 +1293,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        false,
 			description:        "No records returned should still release semaphore",
-			stopChan:           nil, // No stop channel needed
+			stopChan:           nil,                             // No stop channel needed
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1306,7 +1306,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        false, // batchContinue, not error
 			description:        "ExpiredIteratorException with successful getShardIterator should release semaphore",
-			stopChan:           nil, // No stop channel needed
+			stopChan:           nil,                             // No stop channel needed
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1319,7 +1319,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        true, // batchError when getShardIterator fails
 			description:        "ExpiredIteratorException with failed getShardIterator should release semaphore",
-			stopChan:           nil, // No stop channel needed
+			stopChan:           nil,                             // No stop channel needed
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1332,7 +1332,7 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        false, // batchBreak, not error
 			description:        "Stop signal during record processing should release semaphore",
-			stopChan:           make(chan struct{}), // Need stop channel
+			stopChan:           make(chan struct{}),             // Need stop channel
 			recordsChan:        make(chan *consumedRecord, 100), // Buffered - won't block
 			tickerInterval:     100 * time.Millisecond,
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: false, finalSequenceNumber: ""},
@@ -1345,9 +1345,9 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        true, // batchError when commit fails
 			description:        "Commit ticker fires and commit fails should release semaphore",
-			stopChan:           nil, // No stop channel needed
-			recordsChan:        make(chan *consumedRecord), // Unbuffered - will block record sending to force commit ticker
-			tickerInterval:     1 * time.Millisecond, // Fast ticker
+			stopChan:           nil,                                                                                      // No stop channel needed
+			recordsChan:        make(chan *consumedRecord),                                                               // Unbuffered - will block record sending to force commit ticker
+			tickerInterval:     1 * time.Millisecond,                                                                     // Fast ticker
 			checkpointerConfig: checkpointerConfig{tableName: "error-trigger", finished: false, finalSequenceNumber: ""}, // Trigger error
 			runStopGoroutine:   false,
 		},
@@ -1358,38 +1358,38 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 			},
 			expectError:        false, // batchSuccess when commit succeeds with finishCommitted=true
 			description:        "Commit ticker fires and commit succeeds with finishCommitted should release semaphore",
-			stopChan:           nil, // No stop channel needed
-			recordsChan:        make(chan *consumedRecord), // Unbuffered - will block record sending to force commit ticker
-			tickerInterval:     1 * time.Millisecond, // Fast ticker
+			stopChan:           nil,                                                                                  // No stop channel needed
+			recordsChan:        make(chan *consumedRecord),                                                           // Unbuffered - will block record sending to force commit ticker
+			tickerInterval:     1 * time.Millisecond,                                                                 // Fast ticker
 			checkpointerConfig: checkpointerConfig{tableName: "test-table", finished: true, finalSequenceNumber: ""}, // Force finishCommitted=true
 			runStopGoroutine:   false,
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Minimal setup - only what processRecordsBatch needs
 			semaphore := make(chan struct{}, 1) // Capacity of 1 for easy verification
 			mockKinesis := mocks.NewMockKinesis([]string{"test-shard"})
-			
+
 			// Apply test-specific mock setup
 			tc.setupMock(mockKinesis)
-			
+
 			// Create kinsumer with test-specific configuration
 			kinsumer := createTestKinsumer(semaphore, tc.stopChan, tc.recordsChan)
 			kinsumer.kinesis = mockKinesis // Set the mock kinesis
-			
+
 			// Create checkpointer and ticker with test-specific configuration
 			mockCheckpointer, ticker := createCheckpointerAndTicker(tc.checkpointerConfig, tc.tickerInterval)
 			defer ticker.Stop()
-			
+
 			lastSeq := ""
 			lastSeqNum := ""
-			
+
 			// Verify semaphore starts empty
 			before := getSemaphoreUsed(semaphore)
 			assert.Equal(t, 0, before, "Semaphore should start empty")
-			
+
 			// For stop signal test, close the stop channel after a delay to trigger batchBreak
 			if tc.runStopGoroutine && tc.stopChan != nil {
 				go func() {
@@ -1397,15 +1397,15 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 					close(tc.stopChan)
 				}()
 			}
-			
+
 			// Call processRecordsBatch directly - this is where semaphore logic lives
 			iterator := "iter-test-shard-0" // Use format that MockKinesis expects
 			_, result, err := kinsumer.processRecordsBatch(iterator, "test-shard", mockCheckpointer, &lastSeq, &lastSeqNum, ticker)
-			
+
 			// Verify semaphore is released regardless of success or error
 			after := getSemaphoreUsed(semaphore)
 			assert.Equal(t, 0, after, "Semaphore should be released for case: %s - %s", tc.name, tc.description)
-			
+
 			// Verify expected error behavior
 			if tc.expectError {
 				assert.Equal(t, batchError, result, "Expected batchError result for %s", tc.name)
@@ -1414,13 +1414,12 @@ func TestProcessRecordsBatchSemaphoreAllPaths(t *testing.T) {
 				assert.NoError(t, err, "Expected no error for %s", tc.name)
 				assert.NotEqual(t, batchError, result, "Expected non-error result for %s", tc.name)
 			}
-			
+
 			// Verify MockKinesis saw exactly one call
 			totalCalls := mockKinesis.GetTotalCalls()
 			assert.Equal(t, 1, totalCalls, "Expected exactly 1 GetRecords call for %s", tc.name)
-			
+
 			t.Logf("✓ %s: Semaphore properly released (before=%d, after=%d)", tc.description, before, after)
 		})
 	}
 }
-

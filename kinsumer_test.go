@@ -5,13 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"math/rand"
 	"sort"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -600,6 +601,16 @@ func TestSplit(t *testing.T) {
 	})
 	require.NoError(t, err, "Problem merging shards")
 
+	// Send data during the merge operation
+	// This means we also cover bugs to do with timing between the shard action and the consumer
+	const shardActionEvents = 500
+	go func() {
+		// Small delay to ensure merge has started
+		time.Sleep(10 * time.Millisecond)
+		err := spamStream(t, k, shardActionEvents, streamName)
+		require.NoError(t, err, "Problems sending critical data during merge")
+	}()
+
 	require.True(t, shardCount <= shardLimit, "Too many shards")
 	timeout := time.After(time.Second)
 	for {
@@ -624,7 +635,8 @@ func TestSplit(t *testing.T) {
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
-	readEvents(t, output, numberOfEventsToTest)
+	expectedEventsAfterMerge := shardActionEvents + numberOfEventsToTest
+	readEvents(t, output, expectedEventsAfterMerge)
 
 	// Sleep here to wait for stuff to calm down. When running this test
 	// by itself it passes without the sleep but when running all the tests
