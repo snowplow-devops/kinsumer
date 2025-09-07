@@ -123,7 +123,7 @@ func (k *Kinsumer) performLeaderActions() error {
 	if now-shardCache.LastUpdate < k.config.leaderActionFrequency.Nanoseconds() {
 		return nil
 	}
-	curShardIDs, err := loadShardIDsFromKinesis(k.kinesis, k.streamName)
+	curShardIDs, _, _, err := loadShardIDsFromKinesis(k.kinesis, k.streamName)
 	if err != nil {
 		return fmt.Errorf("error loading shard IDs from kinesis: %v", err)
 	}
@@ -276,15 +276,18 @@ func (k *Kinsumer) registerLeadership() (bool, error) {
 	return true, nil
 }
 
-// loadShardIDsFromKinesis returns a sorted slice of shardIDs from kinesis.
+// loadShardIDsFromKinesis returns sorted slices of shardIDs from kinesis.
+// Returns all shards, open shards (EndingSequenceNumber is nil), and closed shards (EndingSequenceNumber is not nil).
 // This function used to use kinesis.DescribeStream, which has a very low throttling limit of 10/s per account.
 // As such, the leader is responsible for caching the shard list.
 // Now that it uses ListShards, you could potentially query the shard list directly from all clients.
 // TODO: Write unit test - needs kinesis mocking
-func loadShardIDsFromKinesis(kin kinsumeriface.KinesisAPI, streamName string) ([]string, error) {
+func loadShardIDsFromKinesis(kin kinsumeriface.KinesisAPI, streamName string) (allShardIDs []string, openShardIDs []string, closedShardIDs []string, err error) {
 	var innerError error
 
-	shardIDs := make([]string, 0)
+	allShardIDs = make([]string, 0)
+	openShardIDs = make([]string, 0)
+	closedShardIDs = make([]string, 0)
 	var token *string
 
 	// Manually page the results since aws-sdk-go has no ListShardsPages.
@@ -308,24 +311,38 @@ func loadShardIDsFromKinesis(kin kinsumeriface.KinesisAPI, streamName string) ([
 		}
 
 		if innerError != nil {
-			return nil, innerError
+			return nil, nil, nil, innerError
 		}
 
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 
 		for _, s := range res.Shards {
-			shardIDs = append(shardIDs, aws.ToString(s.ShardId))
+			shardID := aws.ToString(s.ShardId)
+			allShardIDs = append(allShardIDs, shardID)
+			
+			// Check if shard is OPEN (EndingSequenceNumber is nil) or CLOSED (not nil)
+			if s.SequenceNumberRange.EndingSequenceNumber == nil {
+				// OPEN shard
+				openShardIDs = append(openShardIDs, shardID)
+			} else {
+				// CLOSED shard
+				closedShardIDs = append(closedShardIDs, shardID)
+			}
 		}
 		if res.NextToken == nil {
 			break
 		}
 		token = res.NextToken
 	}
-	sort.Strings(shardIDs)
+	
+	// Sort all three slices
+	sort.Strings(allShardIDs)
+	sort.Strings(openShardIDs)
+	sort.Strings(closedShardIDs)
 
-	return shardIDs, nil
+	return allShardIDs, openShardIDs, closedShardIDs, nil
 }
 
 // loadShardIDsFromDynamo returns the sorted slice of shardIDs from the metadata table in dynamo.

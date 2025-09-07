@@ -465,7 +465,7 @@ func runShardsMergedTest(t *testing.T, iteratorType types.ShardIteratorType) {
 				}
 				cachedShardIDs := shardCache.ShardIDs
 
-				curShardIDs, err := loadShardIDsFromKinesis(k, streamName)
+				curShardIDs, _, _, err := loadShardIDsFromKinesis(k, streamName)
 				if err != nil {
 					fmt.Printf("error loading shard IDs from kinesis: %v", err)
 				}

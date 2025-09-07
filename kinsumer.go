@@ -302,10 +302,11 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 
 	if len(shardIDs) == 0 {
 		// If we haven't yet registered shards, load them from kinesis
-		shardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
+		var openShardIDs, closedShardIDs []string
+		shardIDs, openShardIDs, closedShardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
 		if err == nil {
 			// If the iterator type is set to LATEST, we need to maek the checkpoints table as such.
-			err = k.createBootstrapMarkers(shardIDs)
+			err = k.createBootstrapMarkers(openShardIDs, closedShardIDs)
 			if err == nil {
 				// Set the cache only if the previous function succeeded
 				err = k.setCachedShardIDs(shardIDs)
@@ -737,9 +738,10 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointe
 	return rec, checkpointer, err
 }
 
-// createBootstrapMarkers creates "LATEST" markers for shards without existing checkpoints
+// createBootstrapMarkers creates appropriate markers for shards without existing checkpoints
+// OPEN shards get "LATEST" markers, CLOSED shards get "Finished" markers
 // This distinguishes true bootstrap scenarios from shard scaling operations
-func (k *Kinsumer) createBootstrapMarkers(shardIDs []string) error {
+func (k *Kinsumer) createBootstrapMarkers(openShardIDs []string, closedShardIDs []string) error {
 	// Only create bootstrap markers if configured iterator type is LATEST
 	if k.config.iteratorType != ktypes.ShardIteratorTypeLatest {
 		return nil
@@ -752,8 +754,9 @@ func (k *Kinsumer) createBootstrapMarkers(shardIDs []string) error {
 	}
 
 	now := time.Now()
-	// Create bootstrap markers for shards without existing checkpoints
-	for _, shardID := range shardIDs {
+	
+	// Create "LATEST" markers for OPEN shards without existing checkpoints
+	for _, shardID := range openShardIDs {
 		// Skip shards that already have checkpoints
 		if _, exists := checkpoints[shardID]; exists {
 			continue
@@ -770,7 +773,7 @@ func (k *Kinsumer) createBootstrapMarkers(shardIDs []string) error {
 
 		item, err := attributevalue.MarshalMap(record)
 		if err != nil {
-			return fmt.Errorf("error marshalling bootstrap marker for shard %s: %v", shardID, err)
+			return fmt.Errorf("error marshalling LATEST bootstrap marker for shard %s: %v", shardID, err)
 		}
 
 		// Use unconditional PutItem to avoid race condition issues
@@ -779,7 +782,40 @@ func (k *Kinsumer) createBootstrapMarkers(shardIDs []string) error {
 			Item:      item,
 		})
 		if err != nil {
-			return fmt.Errorf("error writing bootstrap marker for shard %s: %v", shardID, err)
+			return fmt.Errorf("error writing LATEST bootstrap marker for shard %s: %v", shardID, err)
+		}
+	}
+
+	// Create "Finished" markers for CLOSED shards without existing checkpoints
+	for _, shardID := range closedShardIDs {
+		// Skip shards that already have checkpoints
+		if _, exists := checkpoints[shardID]; exists {
+			continue
+		}
+
+		// Create finished marker for closed shard
+		record := checkpointRecord{
+			Shard:         shardID,
+			SequenceNumber: nil, // No sequence number for finished shards
+			LastUpdate:    now.UnixNano(),
+			LastUpdateRFC: now.UTC().Format(time.RFC1123Z),
+			Finished:      aws.Int64(now.UnixNano()), // Mark as finished
+			FinishedRFC:   aws.String(now.UTC().Format(time.RFC1123Z)),
+			// Leave OwnerID and OwnerName as nil for bootstrap markers
+		}
+
+		item, err := attributevalue.MarshalMap(record)
+		if err != nil {
+			return fmt.Errorf("error marshalling Finished bootstrap marker for shard %s: %v", shardID, err)
+		}
+
+		// Use unconditional PutItem to avoid race condition issues
+		_, err = k.dynamodb.PutItem(context.Background(), &dynamodb.PutItemInput{
+			TableName: aws.String(k.checkpointTableName),
+			Item:      item,
+		})
+		if err != nil {
+			return fmt.Errorf("error writing Finished bootstrap marker for shard %s: %v", shardID, err)
 		}
 	}
 
