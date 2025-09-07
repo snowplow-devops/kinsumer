@@ -514,11 +514,27 @@ func TestLeader(t *testing.T) {
 
 // TestSplit is an integration test of merging shards, checking the closed and new shards are handled correctly.
 func TestSplit(t *testing.T) {
+	testCases := []struct {
+		name         string
+		iteratorType ktypes.ShardIteratorType
+	}{
+		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon},
+		{"LATEST", ktypes.ShardIteratorTypeLatest},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runSplitTest(t, tc.iteratorType)
+		})
+	}
+}
+
+func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	const (
 		numberOfEventsToTest = 4321
 		numberOfClients      = 3
 	)
-	streamName := "TestSplit_stream"
+	streamName := "TestSplit_stream" + string(iteratorType)
 
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
@@ -543,6 +559,7 @@ func TestSplit(t *testing.T) {
 	config = config.WithShardCheckFrequency(500 * time.Millisecond)
 	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
 	config = config.WithCommitFrequency(50 * time.Millisecond)
+	config = config.WithIteratorType(iteratorType)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -579,7 +596,33 @@ func TestSplit(t *testing.T) {
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
-	readEvents(t, output, numberOfEventsToTest)
+	foundBefore := readEvents(t, output, numberOfEventsToTest)
+	// Should have some data
+	assert.Greater(t, foundBefore, 0)
+
+	// If using LATEST, we expect to have started at some point after the data came in,
+	// For TRIM_HORIZON, data should be complete.
+	if iteratorType == ktypes.ShardIteratorTypeLatest {
+		assert.Less(t, foundBefore, numberOfEventsToTest)
+	} else if iteratorType == ktypes.ShardIteratorTypeTrimHorizon {
+		assert.Equal(t, foundBefore, numberOfEventsToTest)
+	}
+
+	// TODO: Test may have failed before due to timing issue.
+	// Check this iteration of the test on the previous implementation, to see if it does reproduce the problem.
+	// Timing issue not present in TestShardsMerged, so we do have validation of our implementation.
+
+	// Wait a bit for all shard consumption to begin
+	time.Sleep(1000 * time.Millisecond)
+
+	// Now we should get all the data we send from here in
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems spamming stream with events")
+
+	foundBefore2 := readEvents(t, output, numberOfEventsToTest)
+	// Should have some data
+	assert.Greater(t, foundBefore2, 0)
+	assert.Equal(t, foundBefore2, numberOfEventsToTest)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -632,11 +675,15 @@ func TestSplit(t *testing.T) {
 	newShards := desc.StreamDescription.Shards
 	require.Equal(t, shardCount+1, int32(len(newShards)), "Wrong number of shards after merging")
 
+	// Check if we got all the events we sent during the shard action
+	foundDuring := readEvents(t, output, shardActionEvents)
+	assert.Equal(t, shardActionEvents, foundDuring)
+
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
-	expectedEventsAfterMerge := shardActionEvents + numberOfEventsToTest
-	readEvents(t, output, expectedEventsAfterMerge)
+	foundAfter := readEvents(t, output, numberOfEventsToTest)
+	assert.Equal(t, numberOfEventsToTest, foundAfter)
 
 	// Sleep here to wait for stuff to calm down. When running this test
 	// by itself it passes without the sleep but when running all the tests
@@ -680,7 +727,7 @@ DrainLoop:
 	assert.Equal(t, 0, extraEvents, "Got %d extra events afterwards", extraEvents)
 }
 
-func readEvents(t *testing.T, output chan int, numberOfEventsToTest int) {
+func readEvents(t *testing.T, output chan int, numberOfEventsToTest int) int {
 	eventsFound := make([]bool, numberOfEventsToTest)
 	total := 0
 
@@ -699,5 +746,6 @@ ProcessLoop:
 		}
 	}
 
-	t.Logf("Got all %d out of %d events\n", total, numberOfEventsToTest)
+	t.Logf("Got %d out of %d events\n", total, numberOfEventsToTest)
+	return total
 }
