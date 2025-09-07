@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -300,9 +301,15 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	if len(shardIDs) == 0 {
+		// If we haven't yet registered shards, load them from kinesis
 		shardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
 		if err == nil {
-			err = k.setCachedShardIDs(shardIDs)
+			// If the iterator type is set to LATEST, we need to maek the checkpoints table as such.
+			err = k.createBootstrapMarkers(shardIDs)
+			if err == nil {
+				// Set the cache only if the previous function succeeded
+				err = k.setCachedShardIDs(shardIDs)
+			}
 		}
 	}
 
@@ -728,6 +735,55 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointe
 	}
 
 	return rec, checkpointer, err
+}
+
+// createBootstrapMarkers creates "LATEST" markers for shards without existing checkpoints
+// This distinguishes true bootstrap scenarios from shard scaling operations
+func (k *Kinsumer) createBootstrapMarkers(shardIDs []string) error {
+	// Only create bootstrap markers if configured iterator type is LATEST
+	if k.config.iteratorType != ktypes.ShardIteratorTypeLatest {
+		return nil
+	}
+
+	// Load existing checkpoints to see which shards already have records
+	checkpoints, err := loadCheckpoints(k.dynamodb, k.checkpointTableName)
+	if err != nil {
+		return fmt.Errorf("error loading existing checkpoints: %v", err)
+	}
+
+	now := time.Now()
+	// Create bootstrap markers for shards without existing checkpoints
+	for _, shardID := range shardIDs {
+		// Skip shards that already have checkpoints
+		if _, exists := checkpoints[shardID]; exists {
+			continue
+		}
+
+		// Create bootstrap marker with "LATEST" as sequence number
+		record := checkpointRecord{
+			Shard:          shardID,
+			SequenceNumber: aws.String("LATEST"), // Bootstrap marker
+			LastUpdate:     now.UnixNano(),
+			LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
+			// Leave OwnerID and OwnerName as nil for bootstrap markers
+		}
+
+		item, err := attributevalue.MarshalMap(record)
+		if err != nil {
+			return fmt.Errorf("error marshalling bootstrap marker for shard %s: %v", shardID, err)
+		}
+
+		// Use unconditional PutItem to avoid race condition issues
+		_, err = k.dynamodb.PutItem(context.Background(), &dynamodb.PutItemInput{
+			TableName: aws.String(k.checkpointTableName),
+			Item:      item,
+		})
+		if err != nil {
+			return fmt.Errorf("error writing bootstrap marker for shard %s: %v", shardID, err)
+		}
+	}
+
+	return nil
 }
 
 // CreateRequiredTables will create the required dynamodb tables
