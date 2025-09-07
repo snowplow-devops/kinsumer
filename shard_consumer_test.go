@@ -344,10 +344,26 @@ func TestPotentialLegitimateDuplicates(t *testing.T) {
 // duplicates in TestSplit were down to some incorrect handling of merging shards. This proved not to be the case, and the unit tests below further isolate the cause
 // for that phenomenon, but there's no harm in keeping this test to isolate the behaviour of consumers when shards merge.
 func TestShardsMerged(t *testing.T) {
+	testCases := []struct {
+		name         string
+		iteratorType types.ShardIteratorType
+	}{
+		{"TRIM_HORIZON", types.ShardIteratorTypeTrimHorizon},
+		{"LATEST", types.ShardIteratorTypeLatest},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runShardsMergedTest(t, tc.iteratorType)
+		})
+	}
+}
+
+func runShardsMergedTest(t *testing.T, iteratorType types.ShardIteratorType) {
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
-	streamName := "TestShardsMerged_stream"
+	streamName := "TestShardsMerged_stream" + string(iteratorType)
 
 	k, dynamo := kinesisAndDynamoInstances(t)
 
@@ -365,7 +381,7 @@ func TestShardsMerged(t *testing.T) {
 		WithShardCheckFrequency(500 * time.Millisecond).
 		WithLeaderActionFrequency(500 * time.Millisecond).
 		WithCommitFrequency(100 * time.Millisecond).
-		WithIteratorType(types.ShardIteratorTypeLatest)
+		WithIteratorType(iteratorType)
 
 	kinsumer1, err := NewWithInterfaces(k, dynamo, streamName, *applicationName, "client_1", "", config)
 	require.NoError(t, err)
