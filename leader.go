@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"sort"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -112,6 +113,12 @@ func (k *Kinsumer) performLeaderActions() error {
 		return fmt.Errorf("error loading shard cache from dynamo: %v", err)
 	}
 	cachedShardIDs := shardCache.ShardIDs
+	// If we haven't yet registered shards, wait for next time.
+	// The first client to successfully set up our shard management will set the cache.
+	if len(cachedShardIDs) == 0 {
+		return nil
+	}
+
 	now := time.Now().UnixNano()
 	if now-shardCache.LastUpdate < k.config.leaderActionFrequency.Nanoseconds() {
 		return nil
