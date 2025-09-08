@@ -555,11 +555,11 @@ func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	output := make(chan int, numberOfClients)
 	var waitGroup sync.WaitGroup
 
-	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(50 * time.Millisecond)
-	config = config.WithIteratorType(iteratorType)
+	config := NewConfig().WithBufferSize(numberOfEventsToTest).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(iteratorType)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
