@@ -295,25 +295,26 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
-
 	if err != nil {
 		return false, err
 	}
 
+	// Here's what we want:
+	// - if shard iterator is TRIM_HORIZON: use the full list of shard IDs, and don't do the bootstrap
+	// - if shard iterator is LATEST: use only open shard IDs, and do the bootstrap
+
 	if len(shardIDs) == 0 {
-		// If we haven't yet registered shards, load them from kinesis
-		var openShardIDs, closedShardIDs []string
-		shardIDs, openShardIDs, closedShardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
+
+		// initialiseIteratorType ensures co-ordinated behaviuor across clients for our configured iterator type,
+		// and returns only the shardIDs that this client should care about.
+		shardIDs, err = k.initialiseIteratorType()
 		if err == nil {
-			// If the iterator type is set to LATEST, we need to maek the checkpoints table as such.
-			err = k.createBootstrapMarkers(openShardIDs, closedShardIDs)
-			if err == nil {
-				// Set the cache only if the previous function succeeded
-				err = k.setCachedShardIDs(shardIDs)
-			}
+			// If that didn't error, set the cache
+			err = k.setCachedShardIDs(shardIDs)
 		}
 	}
 
+	// If any above error state was reached, fail
 	if err != nil {
 		return false, err
 	}
@@ -738,23 +739,45 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointe
 	return rec, checkpointer, err
 }
 
+// initialiseIteratorType polls kinesis for shardIDs, and returns the shard IDs that our iterator type should be concerned with.
+// For LATEST, it also initialises entries in the checkpoints table, to ensure that:
+// - Any consumer picking up a shard knows when to start from LATEST
+// - All closed shards are marked as finished, so the leader doesn't re-add them to the shard cache
+func (k *Kinsumer) initialiseIteratorType() ([]string, error) {
+	// Get shard IDs from kinesis
+	allShardIDs, openShardIDs, closedShardIDs, err := loadShardIDsFromKinesis(k.kinesis, k.streamName)
+	if err != nil {
+		return nil, fmt.Errorf("error loading shard IDs from kinesis: %v", err)
+	}
+
+	if k.config.iteratorType != ktypes.ShardIteratorTypeLatest {
+		// If iterator type is not LATEST, return all shard IDs and proceed
+		return allShardIDs, nil
+	}
+
+	// Otherwise, create bootstrap markers and proceed using only open shard IDs
+	err = k.createBootstrapMarkers(openShardIDs, closedShardIDs)
+	if err != nil {
+		return nil, fmt.Errorf("error creating bootstrap markers: %v", err)
+	}
+
+	return openShardIDs, nil
+}
+
 // createBootstrapMarkers creates appropriate markers for shards without existing checkpoints
 // OPEN shards get "LATEST" markers, CLOSED shards get "Finished" markers
 // This distinguishes true bootstrap scenarios from shard scaling operations
 func (k *Kinsumer) createBootstrapMarkers(openShardIDs []string, closedShardIDs []string) error {
-	// Only create bootstrap markers if configured iterator type is LATEST
-	if k.config.iteratorType != ktypes.ShardIteratorTypeLatest {
-		return nil
-	}
 
 	// Load existing checkpoints to see which shards already have records
 	checkpoints, err := loadCheckpoints(k.dynamodb, k.checkpointTableName)
 	if err != nil {
 		return fmt.Errorf("error loading existing checkpoints: %v", err)
 	}
+	// TODO: if this returns soemthing, another client is likely already updating the table. Maybe wait?
 
 	now := time.Now()
-	
+
 	// Create "LATEST" markers for OPEN shards without existing checkpoints
 	for _, shardID := range openShardIDs {
 		// Skip shards that already have checkpoints
@@ -795,12 +818,12 @@ func (k *Kinsumer) createBootstrapMarkers(openShardIDs []string, closedShardIDs 
 
 		// Create finished marker for closed shard
 		record := checkpointRecord{
-			Shard:         shardID,
+			Shard:          shardID,
 			SequenceNumber: nil, // No sequence number for finished shards
-			LastUpdate:    now.UnixNano(),
-			LastUpdateRFC: now.UTC().Format(time.RFC1123Z),
-			Finished:      aws.Int64(now.UnixNano()), // Mark as finished
-			FinishedRFC:   aws.String(now.UTC().Format(time.RFC1123Z)),
+			LastUpdate:     now.UnixNano(),
+			LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
+			Finished:       aws.Int64(now.UnixNano()), // Mark as finished
+			FinishedRFC:    aws.String(now.UTC().Format(time.RFC1123Z)),
 			// Leave OwnerID and OwnerName as nil for bootstrap markers
 		}
 
