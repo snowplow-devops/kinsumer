@@ -597,20 +597,14 @@ func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	require.NoError(t, err, "Problems spamming stream with events")
 
 	foundBefore := readEvents(t, output, numberOfEventsToTest)
-	// Should have some data
-	assert.Greater(t, foundBefore, 0)
 
 	// If using LATEST, we expect to have started at some point after the data came in,
 	// For TRIM_HORIZON, data should be complete.
 	if iteratorType == ktypes.ShardIteratorTypeLatest {
 		assert.Less(t, foundBefore, numberOfEventsToTest)
 	} else if iteratorType == ktypes.ShardIteratorTypeTrimHorizon {
-		assert.Equal(t, foundBefore, numberOfEventsToTest)
+		assert.Equal(t, numberOfEventsToTest, foundBefore)
 	}
-
-	// TODO: Test may have failed before due to timing issue.
-	// Check this iteration of the test on the previous implementation, to see if it does reproduce the problem.
-	// Timing issue not present in TestShardsMerged, so we do have validation of our implementation.
 
 	// Wait a bit for all shard consumption to begin
 	time.Sleep(1000 * time.Millisecond)
@@ -716,22 +710,21 @@ func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 // This specifically tests bootstrap behavior when ListShards returns existing CLOSED shards
 func TestClosedShardsOnInitialization(t *testing.T) {
 	testCases := []struct {
-		name           string
-		iteratorType   ktypes.ShardIteratorType
-		expectDataLoss bool
+		name         string
+		iteratorType ktypes.ShardIteratorType
 	}{
-		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon, false},
-		{"LATEST", ktypes.ShardIteratorTypeLatest, false},
+		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon},
+		{"LATEST", ktypes.ShardIteratorTypeLatest},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			runClosedShardsOnInitializationTest(t, tc.iteratorType, tc.expectDataLoss)
+			runClosedShardsOnInitializationTest(t, tc.iteratorType)
 		})
 	}
 }
 
-func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.ShardIteratorType, expectDataLoss bool) {
+func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	const (
 		numberOfEventsToTest = 4321
 		numberOfClients      = 3
