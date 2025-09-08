@@ -4,7 +4,9 @@ package kinsumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -294,18 +297,26 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
-
 	if err != nil {
 		return false, err
 	}
 
+	// Here's what we want:
+	// - if shard iterator is TRIM_HORIZON: use the full list of shard IDs, and don't do the bootstrap
+	// - if shard iterator is LATEST: use only open shard IDs, and do the bootstrap
+
 	if len(shardIDs) == 0 {
-		shardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
+
+		// initialiseIteratorType ensures co-ordinated behaviuor across clients for our configured iterator type,
+		// and returns only the shardIDs that this client should care about.
+		shardIDs, err = k.initialiseIteratorType()
 		if err == nil {
+			// If that didn't error, set the cache
 			err = k.setCachedShardIDs(shardIDs)
 		}
 	}
 
+	// If any above error state was reached, fail
 	if err != nil {
 		return false, err
 	}
@@ -729,6 +740,180 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointe
 
 	return rec, checkpointer, err
 }
+
+// initialiseIteratorType polls kinesis for shardIDs, and returns the shard IDs that our iterator type should be concerned with.
+// For LATEST, it also initialises entries in the checkpoints table, to ensure that:
+// - Any consumer picking up a shard knows when to start from LATEST
+// - All closed shards are marked as finished, so the leader doesn't re-add them to the shard cache
+func (k *Kinsumer) initialiseIteratorType() ([]string, error) {
+	// Get shard IDs from kinesis
+	allShardIDs, openShardIDs, closedShardIDs, err := loadShardIDsFromKinesis(k.kinesis, k.streamName)
+	if err != nil {
+		return nil, fmt.Errorf("error loading shard IDs from kinesis: %v", err)
+	}
+
+	if k.config.iteratorType != ktypes.ShardIteratorTypeLatest {
+		// If iterator type is not LATEST, return all shard IDs and proceed
+		return allShardIDs, nil
+	}
+
+	// Otherwise, create bootstrap checkpoints and proceed using only open shard IDs
+	err = k.createBootstrapCheckpoints(openShardIDs, closedShardIDs)
+	if err != nil {
+		return nil, fmt.Errorf("error creating bootstrap checkpoints: %v", err)
+	}
+
+	return openShardIDs, nil
+}
+
+// createBootstrapCheckpoints creates appropriate checkpoint records for shards without existing checkpoints
+// OPEN shards get "LATEST" sequence number checkpoints, CLOSED shards get "Finished" checkpoints
+// This distinguishes true bootstrap scenarios from shard scaling operations
+func (k *Kinsumer) createBootstrapCheckpoints(openShardIDs []string, closedShardIDs []string) error {
+
+	nCheckpoints := 0
+	var checkpoints map[string]*checkpointRecord
+	var err error
+
+	for {
+		// It is safe for more than one client to bootstrap at a time, but we don't want to spam when we have a lot of shards.
+		// So, we loop here to check if a bootstrap is in progress.
+		// If it is, we wait until either it's done, or it stopped updating before it finshed.
+		// If the latter, we break the loop and take over writing the remaining shard bootstraps.
+
+		// Load existing checkpoints to see which shards already have records
+		checkpoints, err = loadCheckpoints(k.dynamodb, k.checkpointTableName)
+		if err != nil {
+			return fmt.Errorf("error loading existing checkpoints: %v", err)
+		}
+
+		if len(checkpoints) >= len(openShardIDs)+len(closedShardIDs) {
+			// Another client has completed the bootstrap
+			// >= just in case it's during a shard action
+			return nil
+		}
+		if len(checkpoints) != nCheckpoints {
+			// Another client is updating the table, give it a chance to finish, and check again
+			nCheckpoints = len(checkpoints)
+			jitter := time.Duration(900+rand.Intn(200)) * time.Millisecond
+			time.Sleep(jitter)
+			continue
+		}
+		// Otherwise, we have shard IDs to bootstrap,  so proceed
+		break
+	}
+
+	now := time.Now()
+
+	// Create "LATEST" checkpoints for OPEN shards without existing checkpoints
+	for _, shardID := range openShardIDs {
+		// Skip shards that already have checkpoints
+		if _, exists := checkpoints[shardID]; exists {
+			continue
+		}
+
+		// Create bootstrap checkpoint with "LATEST" as sequence number
+		record := checkpointRecord{
+			Shard:          shardID,
+			SequenceNumber: aws.String("LATEST"), // Bootstrap checkpoint
+			LastUpdate:     now.UnixNano(),
+			LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
+			// Leave OwnerID and OwnerName as nil for bootstrap checkpoints
+		}
+
+		if err := k.writeCheckpointWithCondition(record); err != nil {
+			return fmt.Errorf("error bootstrapping checkpoint for open shard %s: %v", shardID, err)
+		}
+	}
+
+	// Create "Finished" checkpoints for CLOSED shards without existing checkpoints
+	for _, shardID := range closedShardIDs {
+		// Skip shards that already have checkpoints
+		if _, exists := checkpoints[shardID]; exists {
+			continue
+		}
+
+		// Create finished checkpoint for closed shard
+		record := checkpointRecord{
+			Shard:          shardID,
+			SequenceNumber: nil, // No sequence number for finished shards
+			LastUpdate:     now.UnixNano(),
+			LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
+			Finished:       aws.Int64(now.UnixNano()), // Mark as finished
+			FinishedRFC:    aws.String(now.UTC().Format(time.RFC1123Z)),
+			// Leave OwnerID and OwnerName as nil for bootstrap checkpoints
+		}
+
+		if err := k.writeCheckpointWithCondition(record); err != nil {
+			return fmt.Errorf("error bootstrapping checkpoint for closed shard: %s: %v", shardID, err)
+		}
+	}
+
+	return nil
+}
+
+// writeCheckpointWithCondition writes a single checkpoint record with conditional expression to prevent overwrites
+// Returns nil if the record was written successfully or if it already exists (no-op)
+// Handles throttling with exponential backoff and retry
+func (k *Kinsumer) writeCheckpointWithCondition(record checkpointRecord) error {
+	// Marshal the checkpoint record to DynamoDB item
+	item, err := attributevalue.MarshalMap(record)
+	if err != nil {
+		return fmt.Errorf("error marshalling checkpoint record: %v", err)
+	}
+
+	const maxRetries = 3
+	var lastErr error
+
+	// Retry with exponential backoff for throttling
+	for retry := 0; retry < maxRetries; retry++ {
+		// Use conditional PutItem to prevent overwriting existing checkpoints
+		_, err = k.dynamodb.PutItem(context.Background(), &dynamodb.PutItemInput{
+			TableName:                    aws.String(k.checkpointTableName),
+			Item:                         item,
+			ConditionExpression:          aws.String("attribute_not_exists(#shard)"),
+			ExpressionAttributeNames:     map[string]string{"#shard": "Shard"},
+		})
+
+		if err != nil {
+			lastErr = err
+
+			// Check if it's a conditional check failure (record already exists)
+			var conditionalCheckFailed *dbtypes.ConditionalCheckFailedException
+			if errors.As(err, &conditionalCheckFailed) {
+				// This is expected when another client has already written the checkpoint
+				// Return nil to indicate this is not an error condition
+				return nil
+			}
+
+			// Check if it's a throttling exception
+			var provisionedThroughputErr *dbtypes.ProvisionedThroughputExceededException
+			if errors.As(err, &provisionedThroughputErr) {
+				// Retry on throttling with exponential backoff
+				k.config.logger.Log("DynamoDB throttling on checkpoint write (retry %d/%d): %v", retry+1, maxRetries, err)
+
+				if retry < maxRetries-1 { // Don't sleep after the last attempt
+					// Exponential backoff with jitter: base delay * 2^retry + random jitter
+					baseDelay := 100 * time.Millisecond
+					backoffDelay := time.Duration(1<<uint(retry)) * baseDelay
+					jitter := time.Duration(rand.Intn(100)) * time.Millisecond
+					time.Sleep(backoffDelay + jitter)
+				}
+				continue
+			}
+
+			// For other errors, return immediately (no retry)
+			return err
+		}
+
+		// Success
+		return nil
+	}
+
+	// All retries exhausted, return the last error received
+	return lastErr
+}
+
 
 // CreateRequiredTables will create the required dynamodb tables
 // based on the applicationName

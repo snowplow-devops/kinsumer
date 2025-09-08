@@ -5,13 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"math/rand"
 	"sort"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -513,11 +514,27 @@ func TestLeader(t *testing.T) {
 
 // TestSplit is an integration test of merging shards, checking the closed and new shards are handled correctly.
 func TestSplit(t *testing.T) {
+	testCases := []struct {
+		name         string
+		iteratorType ktypes.ShardIteratorType
+	}{
+		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon},
+		{"LATEST", ktypes.ShardIteratorTypeLatest},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runSplitTest(t, tc.iteratorType)
+		})
+	}
+}
+
+func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	const (
 		numberOfEventsToTest = 4321
 		numberOfClients      = 3
 	)
-	streamName := "TestSplit_stream"
+	streamName := "TestSplit_stream" + string(iteratorType)
 
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
@@ -538,10 +555,11 @@ func TestSplit(t *testing.T) {
 	output := make(chan int, numberOfClients)
 	var waitGroup sync.WaitGroup
 
-	config := NewConfig().WithBufferSize(numberOfEventsToTest)
-	config = config.WithShardCheckFrequency(500 * time.Millisecond)
-	config = config.WithLeaderActionFrequency(500 * time.Millisecond)
-	config = config.WithCommitFrequency(50 * time.Millisecond)
+	config := NewConfig().WithBufferSize(numberOfEventsToTest).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(iteratorType)
 
 	for i := 0; i < numberOfClients; i++ {
 		if i > 0 {
@@ -578,7 +596,27 @@ func TestSplit(t *testing.T) {
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
-	readEvents(t, output, numberOfEventsToTest)
+	foundBefore := readEvents(t, output, numberOfEventsToTest)
+
+	// If using LATEST, we expect to have started at some point after the data came in,
+	// For TRIM_HORIZON, data should be complete.
+	if iteratorType == ktypes.ShardIteratorTypeLatest {
+		assert.Less(t, foundBefore, numberOfEventsToTest)
+	} else if iteratorType == ktypes.ShardIteratorTypeTrimHorizon {
+		assert.Equal(t, numberOfEventsToTest, foundBefore)
+	}
+
+	// Wait a bit for all shard consumption to begin
+	time.Sleep(1000 * time.Millisecond)
+
+	// Now we should get all the data we send from here in
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems spamming stream with events")
+
+	foundBefore2 := readEvents(t, output, numberOfEventsToTest)
+	// Should have some data
+	assert.Greater(t, foundBefore2, 0)
+	assert.Equal(t, foundBefore2, numberOfEventsToTest)
 
 	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
 		StreamName: &streamName,
@@ -599,6 +637,16 @@ func TestSplit(t *testing.T) {
 		AdjacentShardToMerge: aws.String(*shards[1].ShardId),
 	})
 	require.NoError(t, err, "Problem merging shards")
+
+	// Send data during the merge operation
+	// This means we also cover bugs to do with timing between the shard action and the consumer
+	const shardActionEvents = 500
+	go func() {
+		// Small delay to ensure merge has started
+		time.Sleep(10 * time.Millisecond)
+		err := spamStream(t, k, shardActionEvents, streamName)
+		require.NoError(t, err, "Problems sending critical data during merge")
+	}()
 
 	require.True(t, shardCount <= shardLimit, "Too many shards")
 	timeout := time.After(time.Second)
@@ -621,10 +669,15 @@ func TestSplit(t *testing.T) {
 	newShards := desc.StreamDescription.Shards
 	require.Equal(t, shardCount+1, int32(len(newShards)), "Wrong number of shards after merging")
 
+	// Check if we got all the events we sent during the shard action
+	foundDuring := readEvents(t, output, shardActionEvents)
+	assert.Equal(t, shardActionEvents, foundDuring)
+
 	err = spamStream(t, k, numberOfEventsToTest, streamName)
 	require.NoError(t, err, "Problems spamming stream with events")
 
-	readEvents(t, output, numberOfEventsToTest)
+	foundAfter := readEvents(t, output, numberOfEventsToTest)
+	assert.Equal(t, numberOfEventsToTest, foundAfter)
 
 	// Sleep here to wait for stuff to calm down. When running this test
 	// by itself it passes without the sleep but when running all the tests
@@ -653,6 +706,210 @@ func TestSplit(t *testing.T) {
 	waitGroup.Wait()
 }
 
+// TestClosedShardsOnInitialization tests client initialization when CLOSED shards already exist
+// This specifically tests bootstrap behavior when ListShards returns existing CLOSED shards
+func TestClosedShardsOnInitialization(t *testing.T) {
+	testCases := []struct {
+		name         string
+		iteratorType ktypes.ShardIteratorType
+	}{
+		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon},
+		{"LATEST", ktypes.ShardIteratorTypeLatest},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runClosedShardsOnInitializationTest(t, tc.iteratorType)
+		})
+	}
+}
+
+func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
+	const (
+		numberOfEventsToTest = 4321
+		numberOfClients      = 3
+	)
+	streamName := "TestClosedShardsInit_stream" + string(iteratorType)
+
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	k, d := kinesisAndDynamoInstances(t)
+
+	defer func() {
+		err := cleanupTestEnvironment(t, k, d, streamName)
+		require.NoError(t, err, "Problems cleaning up the test environment")
+	}()
+
+	err := setupTestEnvironment(t, k, d, streamName, shardCount)
+	require.NoError(t, err, "Problems setting up the test environment")
+
+	// Send initial data to the stream BEFORE merge operation
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems sending initial data")
+
+	// Perform merge operation to create CLOSED shards (copied from TestSplit)
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+		StreamName: &streamName,
+		Limit:      aws.Int32(shardLimit),
+	})
+	require.NoError(t, err, "Error describing stream")
+	shards := desc.StreamDescription.Shards
+	require.True(t, len(shards) >= 2, "Fewer than 2 shards")
+
+	_, err = k.MergeShards(t.Context(), &kinesis.MergeShardsInput{
+		StreamName:           &streamName,
+		ShardToMerge:         aws.String(*shards[0].ShardId),
+		AdjacentShardToMerge: aws.String(*shards[1].ShardId),
+	})
+	require.NoError(t, err, "Problem merging shards")
+
+	// Send data during the merge operation
+	// This means we also cover bugs to do with timing between the shard action and the consumer
+	const shardActionEvents = 500
+	go func() {
+		// Small delay to ensure merge has started
+		time.Sleep(10 * time.Millisecond)
+		// Index should start where the last spamStream ended, since we're reading both at once in this test
+		err := spamStreamModified(t, k, shardActionEvents, streamName, numberOfEventsToTest)
+		require.NoError(t, err, "Problems sending critical data during merge")
+	}()
+
+	// Wait for merge to complete
+	require.True(t, shardCount <= shardLimit, "Too many shards")
+	timeout := time.After(time.Second)
+	for {
+		desc, err = k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+			StreamName: &streamName,
+			Limit:      aws.Int32(shardLimit),
+		})
+		require.NoError(t, err, "Error describing stream")
+		if desc.StreamDescription.StreamStatus == "ACTIVE" {
+			break
+		}
+		select {
+		case <-timeout:
+			require.FailNow(t, "Timedout after merging shards")
+		default:
+			time.Sleep(*resourceChangeTimeout)
+		}
+	}
+	newShards := desc.StreamDescription.Shards
+	require.Equal(t, shardCount+1, int32(len(newShards)), "Wrong number of shards after merging")
+
+	// Verify we have CLOSED shards (merged shards should be closed)
+	closedShards := 0
+	openShards := 0
+	for _, shard := range newShards {
+		if shard.SequenceNumberRange.EndingSequenceNumber != nil {
+			closedShards++
+		} else {
+			openShards++
+		}
+	}
+	require.Greater(t, closedShards, 0, "Should have at least one CLOSED shard after merge")
+	require.Greater(t, openShards, 0, "Should have at least one OPEN shard after merge")
+
+	t.Logf("After merge: %d OPEN shards, %d CLOSED shards", openShards, closedShards)
+
+	// Sleep for a bit before adding clients
+	time.Sleep(1000 * time.Millisecond)
+
+	// NOW initialize clients AFTER shards are split and CLOSED shards exist
+	clients := make([]*Kinsumer, numberOfClients)
+	output := make(chan int, numberOfEventsToTest)
+	var waitGroup sync.WaitGroup
+
+	config := NewConfig().WithBufferSize(numberOfEventsToTest * 2).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(iteratorType)
+
+	// Initialize clients
+	for i := 0; i < numberOfClients; i++ {
+		if i > 0 {
+			time.Sleep(50 * time.Millisecond) // Add clients slowly
+		}
+
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_closed_%d", i), "", config)
+		require.NoError(t, err, "NewWithInterfaces() failed")
+		clients[i].clientID = fmt.Sprintf("closed_test_%d", i+1)
+
+		err = clients[i].Run()
+		require.NoError(t, err, "kinsumer.Run() failed")
+
+		waitGroup.Add(1)
+		go func(client *Kinsumer, ci int) {
+			defer waitGroup.Done()
+			for {
+				data, innerError := client.Next()
+				require.NoError(t, innerError, "kinsumer.Next() failed")
+				if data == nil {
+					return
+				}
+				idx, _ := strconv.Atoi(string(data))
+				output <- idx
+			}
+		}(clients[i], i)
+		defer func(ci int) {
+			if clients[ci] != nil {
+				clients[ci].Stop()
+			}
+		}(i)
+	}
+
+	// // DEBUG: Print checkpoints table contents after client initialization
+	// checkpoints, err := loadCheckpoints(d, clients[0].checkpointTableName)
+	// require.NoError(t, err, "Error loading checkpoints for debugging")
+	// t.Logf("=== CHECKPOINTS AFTER CLIENT INITIALIZATION ===")
+	// for shardID, checkpoint := range checkpoints {
+	// 	seqNum := "nil"
+	// 	if checkpoint.SequenceNumber != nil {
+	// 		seqNum = *checkpoint.SequenceNumber
+	// 	}
+	// 	finished := "nil"
+	// 	if checkpoint.Finished != nil {
+	// 		finished = fmt.Sprintf("%d", *checkpoint.Finished)
+	// 	}
+	// 	ownerID := "nil"
+	// 	if checkpoint.OwnerID != nil {
+	// 		ownerID = *checkpoint.OwnerID
+	// 	}
+	// 	t.Logf("Shard %s: SequenceNumber=%s, Finished=%s, OwnerID=%s",
+	// 		shardID, seqNum, finished, ownerID)
+	// }
+	// t.Logf("=== END CHECKPOINTS DEBUG ===")
+
+	// Read any data that was consumed during initialization
+	foundDuringInit := readEvents(t, output, numberOfEventsToTest+shardActionEvents)
+
+	// Verify behavior based on iterator type
+	if iteratorType == ktypes.ShardIteratorTypeLatest {
+		assert.Equal(t, 0, foundDuringInit, "Should read no historical data with LATEST")
+	} else {
+		assert.Equal(t, numberOfEventsToTest+shardActionEvents, foundDuringInit, "Should read all historical data with TRIM_HORIZON")
+	}
+
+	// Send new data after clients are initialized
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems sending new data")
+
+	// Read new data - should always work regardless of iterator type
+	foundAfterInit := readEvents(t, output, numberOfEventsToTest)
+	assert.Equal(t, numberOfEventsToTest, foundAfterInit, "Should read all new data regardless of iterator type")
+
+	// Cleanup
+	for ci, client := range clients {
+		client.Stop()
+		clients[ci] = nil
+	}
+
+	drain(t, output)
+	waitGroup.Wait()
+}
+
 func drain(t *testing.T, output chan int) {
 	extraEvents := 0
 	// Drain in case events duplicated, so we don't hang.
@@ -668,7 +925,7 @@ DrainLoop:
 	assert.Equal(t, 0, extraEvents, "Got %d extra events afterwards", extraEvents)
 }
 
-func readEvents(t *testing.T, output chan int, numberOfEventsToTest int) {
+func readEvents(t *testing.T, output chan int, numberOfEventsToTest int) int {
 	eventsFound := make([]bool, numberOfEventsToTest)
 	total := 0
 
@@ -687,5 +944,6 @@ ProcessLoop:
 		}
 	}
 
-	t.Logf("Got all %d out of %d events\n", total, numberOfEventsToTest)
+	t.Logf("Got %d out of %d events\n", total, numberOfEventsToTest)
+	return total
 }
