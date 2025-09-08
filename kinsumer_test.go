@@ -712,6 +712,203 @@ func runSplitTest(t *testing.T, iteratorType ktypes.ShardIteratorType) {
 	waitGroup.Wait()
 }
 
+// TestClosedShardsOnInitialization tests client initialization when CLOSED shards already exist
+// This specifically tests bootstrap behavior when ListShards returns existing CLOSED shards
+func TestClosedShardsOnInitialization(t *testing.T) {
+	testCases := []struct {
+		name           string
+		iteratorType   ktypes.ShardIteratorType
+		expectDataLoss bool
+	}{
+		{"TRIM_HORIZON", ktypes.ShardIteratorTypeTrimHorizon, false},
+		{"LATEST", ktypes.ShardIteratorTypeLatest, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runClosedShardsOnInitializationTest(t, tc.iteratorType, tc.expectDataLoss)
+		})
+	}
+}
+
+func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.ShardIteratorType, expectDataLoss bool) {
+	const (
+		numberOfEventsToTest = 4321
+		numberOfClients      = 3
+	)
+	streamName := "TestClosedShardsInit_stream" + string(iteratorType)
+
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	k, d := kinesisAndDynamoInstances(t)
+
+	defer func() {
+		err := cleanupTestEnvironment(t, k, d, streamName)
+		require.NoError(t, err, "Problems cleaning up the test environment")
+	}()
+
+	err := setupTestEnvironment(t, k, d, streamName, shardCount)
+	require.NoError(t, err, "Problems setting up the test environment")
+
+	// Send initial data to the stream BEFORE merge operation
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems sending initial data")
+
+	// Perform merge operation to create CLOSED shards (copied from TestSplit)
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+		StreamName: &streamName,
+		Limit:      aws.Int32(shardLimit),
+	})
+	require.NoError(t, err, "Error describing stream")
+	shards := desc.StreamDescription.Shards
+	require.True(t, len(shards) >= 2, "Fewer than 2 shards")
+
+	_, err = k.MergeShards(t.Context(), &kinesis.MergeShardsInput{
+		StreamName:           &streamName,
+		ShardToMerge:         aws.String(*shards[0].ShardId),
+		AdjacentShardToMerge: aws.String(*shards[1].ShardId),
+	})
+	require.NoError(t, err, "Problem merging shards")
+
+	// Wait for merge to complete
+	require.True(t, shardCount <= shardLimit, "Too many shards")
+	timeout := time.After(time.Second)
+	for {
+		desc, err = k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+			StreamName: &streamName,
+			Limit:      aws.Int32(shardLimit),
+		})
+		require.NoError(t, err, "Error describing stream")
+		if desc.StreamDescription.StreamStatus == "ACTIVE" {
+			break
+		}
+		select {
+		case <-timeout:
+			require.FailNow(t, "Timedout after merging shards")
+		default:
+			time.Sleep(*resourceChangeTimeout)
+		}
+	}
+	newShards := desc.StreamDescription.Shards
+	require.Equal(t, shardCount+1, int32(len(newShards)), "Wrong number of shards after merging")
+
+	// Verify we have CLOSED shards (merged shards should be closed)
+	closedShards := 0
+	openShards := 0
+	for _, shard := range newShards {
+		if shard.SequenceNumberRange.EndingSequenceNumber != nil {
+			closedShards++
+		} else {
+			openShards++
+		}
+	}
+	require.Greater(t, closedShards, 0, "Should have at least one CLOSED shard after merge")
+	require.Greater(t, openShards, 0, "Should have at least one OPEN shard after merge")
+
+	t.Logf("After merge: %d OPEN shards, %d CLOSED shards", openShards, closedShards)
+
+	// Sleep for a bit before adding clients
+	time.Sleep(1000 * time.Millisecond)
+
+	// NOW initialize clients AFTER shards are split and CLOSED shards exist
+	clients := make([]*Kinsumer, numberOfClients)
+	output := make(chan int, numberOfEventsToTest)
+	var waitGroup sync.WaitGroup
+
+	config := NewConfig().WithBufferSize(numberOfEventsToTest * 2).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(50 * time.Millisecond).
+		WithIteratorType(iteratorType)
+
+	// Initialize clients
+	for i := 0; i < numberOfClients; i++ {
+		if i > 0 {
+			time.Sleep(50 * time.Millisecond) // Add clients slowly
+		}
+
+		clients[i], err = NewWithInterfaces(k, d, streamName, *applicationName, fmt.Sprintf("test_closed_%d", i), "", config)
+		require.NoError(t, err, "NewWithInterfaces() failed")
+		clients[i].clientID = fmt.Sprintf("closed_test_%d", i+1)
+
+		err = clients[i].Run()
+		require.NoError(t, err, "kinsumer.Run() failed")
+
+		waitGroup.Add(1)
+		go func(client *Kinsumer, ci int) {
+			defer waitGroup.Done()
+			for {
+				data, innerError := client.Next()
+				require.NoError(t, innerError, "kinsumer.Next() failed")
+				if data == nil {
+					return
+				}
+				idx, _ := strconv.Atoi(string(data))
+				output <- idx
+			}
+		}(clients[i], i)
+		defer func(ci int) {
+			if clients[ci] != nil {
+				clients[ci].Stop()
+			}
+		}(i)
+	}
+
+	// Give clients time to initialize and start consuming
+	time.Sleep(2 * time.Second)
+
+	// // DEBUG: Print checkpoints table contents after client initialization
+	// checkpoints, err := loadCheckpoints(d, clients[0].checkpointTableName)
+	// require.NoError(t, err, "Error loading checkpoints for debugging")
+	// t.Logf("=== CHECKPOINTS AFTER CLIENT INITIALIZATION ===")
+	// for shardID, checkpoint := range checkpoints {
+	// 	seqNum := "nil"
+	// 	if checkpoint.SequenceNumber != nil {
+	// 		seqNum = *checkpoint.SequenceNumber
+	// 	}
+	// 	finished := "nil"
+	// 	if checkpoint.Finished != nil {
+	// 		finished = fmt.Sprintf("%d", *checkpoint.Finished)
+	// 	}
+	// 	ownerID := "nil"
+	// 	if checkpoint.OwnerID != nil {
+	// 		ownerID = *checkpoint.OwnerID
+	// 	}
+	// 	t.Logf("Shard %s: SequenceNumber=%s, Finished=%s, OwnerID=%s",
+	// 		shardID, seqNum, finished, ownerID)
+	// }
+	// t.Logf("=== END CHECKPOINTS DEBUG ===")
+
+	// Read any data that was consumed during initialization
+	foundDuringInit := readEvents(t, output, numberOfEventsToTest)
+
+	// Verify behavior based on iterator type
+	if iteratorType == ktypes.ShardIteratorTypeLatest {
+		assert.Equal(t, 0, foundDuringInit, "Should read no historical data with LATEST")
+	} else {
+		assert.Equal(t, numberOfEventsToTest, foundDuringInit, "Should read all historical data with TRIM_HORIZON")
+	}
+
+	// Send new data after clients are initialized
+	err = spamStream(t, k, numberOfEventsToTest, streamName)
+	require.NoError(t, err, "Problems sending new data")
+
+	// Read new data - should always work regardless of iterator type
+	foundAfterInit := readEvents(t, output, numberOfEventsToTest)
+	assert.Equal(t, numberOfEventsToTest, foundAfterInit, "Should read all new data regardless of iterator type")
+
+	// Cleanup
+	for ci, client := range clients {
+		client.Stop()
+		clients[ci] = nil
+	}
+
+	drain(t, output)
+	waitGroup.Wait()
+}
+
 func drain(t *testing.T, output chan int) {
 	extraEvents := 0
 	// Drain in case events duplicated, so we don't hang.
