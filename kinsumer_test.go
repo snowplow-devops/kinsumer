@@ -772,6 +772,17 @@ func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.Shard
 	})
 	require.NoError(t, err, "Problem merging shards")
 
+	// Send data during the merge operation
+	// This means we also cover bugs to do with timing between the shard action and the consumer
+	const shardActionEvents = 500
+	go func() {
+		// Small delay to ensure merge has started
+		time.Sleep(10 * time.Millisecond)
+		// Index should start where the last spamStream ended, since we're reading both at once in this test
+		err := spamStreamModified(t, k, shardActionEvents, streamName, numberOfEventsToTest)
+		require.NoError(t, err, "Problems sending critical data during merge")
+	}()
+
 	// Wait for merge to complete
 	require.True(t, shardCount <= shardLimit, "Too many shards")
 	timeout := time.After(time.Second)
@@ -856,9 +867,6 @@ func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.Shard
 		}(i)
 	}
 
-	// Give clients time to initialize and start consuming
-	time.Sleep(2 * time.Second)
-
 	// // DEBUG: Print checkpoints table contents after client initialization
 	// checkpoints, err := loadCheckpoints(d, clients[0].checkpointTableName)
 	// require.NoError(t, err, "Error loading checkpoints for debugging")
@@ -882,13 +890,13 @@ func runClosedShardsOnInitializationTest(t *testing.T, iteratorType ktypes.Shard
 	// t.Logf("=== END CHECKPOINTS DEBUG ===")
 
 	// Read any data that was consumed during initialization
-	foundDuringInit := readEvents(t, output, numberOfEventsToTest)
+	foundDuringInit := readEvents(t, output, numberOfEventsToTest+shardActionEvents)
 
 	// Verify behavior based on iterator type
 	if iteratorType == ktypes.ShardIteratorTypeLatest {
 		assert.Equal(t, 0, foundDuringInit, "Should read no historical data with LATEST")
 	} else {
-		assert.Equal(t, numberOfEventsToTest, foundDuringInit, "Should read all historical data with TRIM_HORIZON")
+		assert.Equal(t, numberOfEventsToTest+shardActionEvents, foundDuringInit, "Should read all historical data with TRIM_HORIZON")
 	}
 
 	// Send new data after clients are initialized
