@@ -6,6 +6,26 @@ import (
 	"time"
 )
 
+// MetricsConfig controls which metrics are sent to the StatReceiver
+type MetricsConfig struct {
+	EnableCheckpoint           bool
+	EnableEventToClient        bool
+	EnableEventsFromKinesis    bool
+	EnableRecordsInMemory      bool
+	EnableRecordsInMemoryBytes bool
+}
+
+// NewMetricsConfig returns a MetricsConfig with all metrics enabled (backward compatibility)
+func NewMetricsConfig() MetricsConfig {
+	return MetricsConfig{
+		EnableCheckpoint:           true,
+		EnableEventToClient:        true,
+		EnableEventsFromKinesis:    true,
+		EnableRecordsInMemory:      true,
+		EnableRecordsInMemoryBytes: true,
+	}
+}
+
 //TODO: Update documentation to include the defaults
 //TODO: Update the 'with' methods' comments to be less ridiculous
 
@@ -65,6 +85,7 @@ type Config struct {
 	// this provides natural fairness over time while controlling peak memory usage.
 	// Example: Setting to 20 limits memory to ~20 * 10k records * avg_record_size
 	maxConcurrentShards int
+	metricsConfig       MetricsConfig
 }
 
 // NewConfig returns a default Config struct
@@ -81,6 +102,7 @@ func NewConfig() Config {
 		dynamoWaiterDelay:     3 * time.Second,
 		logger:                &DefaultLogger{},
 		getRecordsLimit:       10000,
+		metricsConfig:         NewMetricsConfig(),
 	}
 }
 
@@ -185,6 +207,13 @@ func (c Config) WithGetRecordsLimit(getRecordsLimit int) Config {
 // 0 (default) means unlimited concurrent shards.
 func (c Config) WithMaxConcurrentShards(maxConcurrentShards int) Config {
 	c.maxConcurrentShards = maxConcurrentShards
+	return c
+}
+
+// WithMetricsConfig returns a Config with a modified metrics configuration
+// This controls which metrics are sent to the StatReceiver
+func (c Config) WithMetricsConfig(metricsConfig MetricsConfig) Config {
+	c.metricsConfig = metricsConfig
 	return c
 }
 

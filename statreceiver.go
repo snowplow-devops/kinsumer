@@ -40,3 +40,11 @@ type StatReceiver interface {
 	// `bytes` Current total payload bytes in the internal buffer
 	RecordsInMemoryBytes(bytes int64)
 }
+
+// ConfigurableStatReceiver is an optional interface for StatReceivers that support
+// selective metric filtering. StatReceivers that implement this interface can be
+// configured to only send specific metrics.
+type ConfigurableStatReceiver interface {
+	StatReceiver
+	WithMetricsConfig(MetricsConfig) StatReceiver
+}
