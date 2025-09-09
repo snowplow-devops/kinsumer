@@ -21,6 +21,7 @@ type TestStatReceiver struct {
 	checkpointCalls           int
 	eventToClientCalls        int
 	eventsFromKinesisCalls    []EventsFromKinesisCall
+	config                    *MetricsConfig // nil means all enabled
 }
 
 // EventsFromKinesisCall captures the parameters of EventsFromKinesis calls
@@ -30,43 +31,60 @@ type EventsFromKinesisCall struct {
 	Lag     time.Duration
 }
 
+// WithMetricsConfig implements the ConfigurableStatReceiver interface
+func (t *TestStatReceiver) WithMetricsConfig(config MetricsConfig) StatReceiver {
+	return &TestStatReceiver{
+		config: &config,
+	}
+}
+
 // Checkpoint captures checkpoint calls
 func (t *TestStatReceiver) Checkpoint() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.checkpointCalls++
+	if t.config == nil || t.config.EnableCheckpoint {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.checkpointCalls++
+	}
 }
 
 // EventToClient captures event to client calls
 func (t *TestStatReceiver) EventToClient(inserted, retrieved time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.eventToClientCalls++
+	if t.config == nil || t.config.EnableEventToClient {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.eventToClientCalls++
+	}
 }
 
 // EventsFromKinesis captures events from kinesis calls
 func (t *TestStatReceiver) EventsFromKinesis(num int, shardID string, lag time.Duration) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.eventsFromKinesisCalls = append(t.eventsFromKinesisCalls, EventsFromKinesisCall{
-		Num:     num,
-		ShardID: shardID,
-		Lag:     lag,
-	})
+	if t.config == nil || t.config.EnableEventsFromKinesis {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.eventsFromKinesisCalls = append(t.eventsFromKinesisCalls, EventsFromKinesisCall{
+			Num:     num,
+			ShardID: shardID,
+			Lag:     lag,
+		})
+	}
 }
 
 // RecordsInMemory captures records in memory calls
 func (t *TestStatReceiver) RecordsInMemory(count int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.recordsInMemoryCalls = append(t.recordsInMemoryCalls, count)
+	if t.config == nil || t.config.EnableRecordsInMemory {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.recordsInMemoryCalls = append(t.recordsInMemoryCalls, count)
+	}
 }
 
 // RecordsInMemoryBytes captures records in memory bytes calls
 func (t *TestStatReceiver) RecordsInMemoryBytes(bytes int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.recordsInMemoryBytesCalls = append(t.recordsInMemoryBytesCalls, bytes)
+	if t.config == nil || t.config.EnableRecordsInMemoryBytes {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.recordsInMemoryBytesCalls = append(t.recordsInMemoryBytesCalls, bytes)
+	}
 }
 
 // Helper methods for testing
@@ -257,4 +275,41 @@ func TestMetricsBasic(t *testing.T) {
 
 	t.Logf("✓ Metrics test completed - RecordsInMemory calls: %v, RecordsInMemoryBytes calls: %v", 
 		recordCalls, byteCalls)
+}
+
+// TestMetricsFiltering tests that metrics can be selectively enabled/disabled
+func TestMetricsFiltering(t *testing.T) {
+	// Test that only RecordsInMemory metrics are captured when others are disabled
+	testStats := &TestStatReceiver{}
+	
+	// Configure to only enable RecordsInMemory
+	metricsConfig := MetricsConfig{
+		EnableRecordsInMemory: true,
+		// All others default to false
+	}
+	
+	// Apply filtering using the TestStatReceiver's WithMetricsConfig method
+	filteredStats, ok := interface{}(testStats).(ConfigurableStatReceiver)
+	if !ok {
+		t.Skip("TestStatReceiver doesn't implement ConfigurableStatReceiver, skipping filtering test")
+	}
+	
+	configuredStats := filteredStats.WithMetricsConfig(metricsConfig)
+	
+	// Call all methods
+	configuredStats.Checkpoint()
+	configuredStats.EventToClient(time.Now(), time.Now())
+	configuredStats.EventsFromKinesis(5, "shard-001", time.Second)
+	configuredStats.RecordsInMemory(100)
+	configuredStats.RecordsInMemoryBytes(500)
+	
+	// Verify only RecordsInMemory was called
+	receiverStats := configuredStats.(*TestStatReceiver)
+	recordCount, byteCount, checkpointCount, eventToClientCount, eventsFromKinesisCount := receiverStats.GetCallCounts()
+	
+	assert.Equal(t, 1, recordCount, "Should have 1 RecordsInMemory call")
+	assert.Equal(t, 0, byteCount, "Should have 0 RecordsInMemoryBytes calls (disabled)")
+	assert.Equal(t, 0, checkpointCount, "Should have 0 Checkpoint calls (disabled)")
+	assert.Equal(t, 0, eventToClientCount, "Should have 0 EventToClient calls (disabled)")
+	assert.Equal(t, 0, eventsFromKinesisCount, "Should have 0 EventsFromKinesis calls (disabled)")
 }
