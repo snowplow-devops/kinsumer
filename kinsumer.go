@@ -543,8 +543,8 @@ func (k *Kinsumer) Run() error {
 			shardChangeTicker.Stop()
 		}()
 
-		// Report buffer size every 5 seconds
-		bufferReportTicker := time.NewTicker(5 * time.Second)
+		// Report buffer size every 1 seconds
+		bufferReportTicker := time.NewTicker(1 * time.Second)
 		defer func() {
 			bufferReportTicker.Stop()
 		}()
