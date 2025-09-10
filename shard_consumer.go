@@ -16,6 +16,7 @@ import (
 )
 
 
+
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time) (string, error) {
 	shardIteratorType := ktypes.ShardIteratorTypeAfterSequenceNumber

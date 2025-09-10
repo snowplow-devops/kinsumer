@@ -41,10 +41,48 @@ type StatReceiver interface {
 	RecordsInMemoryBytes(bytes int64)
 }
 
-// ConfigurableStatReceiver is an optional interface for StatReceivers that support
-// selective metric filtering. StatReceivers that implement this interface can be
-// configured to only send specific metrics.
-type ConfigurableStatReceiver interface {
-	StatReceiver
-	WithMetricsConfig(MetricsConfig) StatReceiver
+// filteredStatReceiver wraps a StatReceiver and filters method calls based on MetricsConfig
+// This allows selective enabling/disabling of metrics at the configuration level
+type filteredStatReceiver struct {
+	underlying StatReceiver
+	config     MetricsConfig
 }
+
+// newFilteredStatReceiver creates a new filteredStatReceiver that wraps the underlying StatReceiver
+func newFilteredStatReceiver(underlying StatReceiver, config MetricsConfig) StatReceiver {
+	return &filteredStatReceiver{
+		underlying: underlying,
+		config:     config,
+	}
+}
+
+func (f *filteredStatReceiver) Checkpoint() {
+	if f.config.EnableCheckpoint {
+		f.underlying.Checkpoint()
+	}
+}
+
+func (f *filteredStatReceiver) EventToClient(inserted, retrieved time.Time) {
+	if f.config.EnableEventToClient {
+		f.underlying.EventToClient(inserted, retrieved)
+	}
+}
+
+func (f *filteredStatReceiver) EventsFromKinesis(num int, shardID string, lag time.Duration) {
+	if f.config.EnableEventsFromKinesis {
+		f.underlying.EventsFromKinesis(num, shardID, lag)
+	}
+}
+
+func (f *filteredStatReceiver) RecordsInMemory(count int64) {
+	if f.config.EnableRecordsInMemory {
+		f.underlying.RecordsInMemory(count)
+	}
+}
+
+func (f *filteredStatReceiver) RecordsInMemoryBytes(bytes int64) {
+	if f.config.EnableRecordsInMemoryBytes {
+		f.underlying.RecordsInMemoryBytes(bytes)
+	}
+}
+

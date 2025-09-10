@@ -151,7 +151,7 @@ func (c Config) WithBufferSize(bufferSize int) Config {
 	return c
 }
 
-// WithStats returns a Config with a modified stats
+// WithStats returns a Config with a modified stats receiver
 func (c Config) WithStats(stats StatReceiver) Config {
 	c.stats = stats
 	return c
