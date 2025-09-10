@@ -14,11 +14,13 @@ type Statsd struct {
 	client statsd.StatSender
 }
 
-// New creates a new Statsd statreceiver with a new instance of a cactus statter
+// New creates a new Statsd statreceiver with buffering enabled by default
 func New(addr, prefix string) (*Statsd, error) {
 	sd, err := statsd.NewClientWithConfig(&statsd.ClientConfig{
-		Address: addr,
-		Prefix:  prefix,
+		Address:       addr,
+		Prefix:        prefix,
+		UseBuffered:   true,            // Enable buffering by default
+		FlushInterval: 1 * time.Second, // Sensible default flush interval
 	})
 
 	if err != nil {
@@ -57,4 +59,16 @@ func (s *Statsd) EventToClient(inserted, retrieved time.Time) {
 func (s *Statsd) EventsFromKinesis(num int, shardID string, lag time.Duration) {
 	_ = s.client.TimingDuration(fmt.Sprintf("kinsumer.%s.lag", shardID), lag, 1.0)
 	_ = s.client.Inc(fmt.Sprintf("kinsumer.%s.retrieved", shardID), int64(num), 1.0)
+}
+
+// RecordsInMemory implementation that writes to statsd a gauge metric about
+// the current number of records buffered in memory
+func (s *Statsd) RecordsInMemory(count int64) {
+	_ = s.client.Gauge("kinsumer.records_in_memory", count, 1.0)
+}
+
+// RecordsInMemoryBytes implementation that writes to statsd a gauge metric about
+// the current total payload bytes buffered in memory
+func (s *Statsd) RecordsInMemoryBytes(bytes int64) {
+	_ = s.client.Gauge("kinsumer.records_in_memory_bytes", bytes, 1.0)
 }
