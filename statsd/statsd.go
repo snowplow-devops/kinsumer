@@ -19,8 +19,8 @@ func New(addr, prefix string) (*Statsd, error) {
 	sd, err := statsd.NewClientWithConfig(&statsd.ClientConfig{
 		Address:       addr,
 		Prefix:        prefix,
-		UseBuffered:   true,                    // Enable buffering by default
-		FlushInterval: 1 * time.Second,        // Sensible default flush interval
+		UseBuffered:   true,            // Enable buffering by default
+		FlushInterval: 1 * time.Second, // Sensible default flush interval
 	})
 
 	if err != nil {
@@ -37,7 +37,6 @@ func NewWithStatter(client statsd.StatSender) *Statsd {
 		client: client,
 	}
 }
-
 
 // Checkpoint implementation that writes to statsd
 func (s *Statsd) Checkpoint() {

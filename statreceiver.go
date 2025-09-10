@@ -85,4 +85,3 @@ func (f *filteredStatReceiver) RecordsInMemoryBytes(bytes int64) {
 		f.underlying.RecordsInMemoryBytes(bytes)
 	}
 }
-

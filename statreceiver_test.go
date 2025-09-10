@@ -30,7 +30,6 @@ type EventsFromKinesisCall struct {
 	Lag     time.Duration
 }
 
-
 // Checkpoint captures checkpoint calls
 func (t *TestStatReceiver) Checkpoint() {
 	t.mu.Lock()
@@ -256,7 +255,7 @@ func TestMetricsBasic(t *testing.T) {
 	assert.True(t, hasNonZeroRecords, "Should have non-zero records in memory at some point")
 	assert.True(t, hasNonZeroBytes, "Should have non-zero bytes in memory at some point")
 
-	t.Logf("✓ Metrics test completed - RecordsInMemory calls: %v, RecordsInMemoryBytes calls: %v", 
+	t.Logf("✓ Metrics test completed - RecordsInMemory calls: %v, RecordsInMemoryBytes calls: %v",
 		recordCalls, byteCalls)
 }
 
@@ -264,26 +263,26 @@ func TestMetricsBasic(t *testing.T) {
 func TestMetricsFiltering(t *testing.T) {
 	// Test that only RecordsInMemory metrics are captured when others are disabled
 	testStats := &TestStatReceiver{}
-	
+
 	// Configure to only enable RecordsInMemory
 	metricsConfig := MetricsConfig{
 		EnableRecordsInMemory: true,
 		// All others default to false
 	}
-	
+
 	// Create a filtered stat receiver using the new approach (simulating WithStats behavior)
 	filteredStats := newFilteredStatReceiver(testStats, metricsConfig)
-	
+
 	// Call all methods on the filtered receiver
 	filteredStats.Checkpoint()
 	filteredStats.EventToClient(time.Now(), time.Now())
 	filteredStats.EventsFromKinesis(5, "shard-001", time.Second)
 	filteredStats.RecordsInMemory(100)
 	filteredStats.RecordsInMemoryBytes(500)
-	
+
 	// Verify only RecordsInMemory was called on the underlying receiver
 	recordCount, byteCount, checkpointCount, eventToClientCount, eventsFromKinesisCount := testStats.GetCallCounts()
-	
+
 	assert.Equal(t, 1, recordCount, "Should have 1 RecordsInMemory call")
 	assert.Equal(t, 0, byteCount, "Should have 0 RecordsInMemoryBytes calls (disabled)")
 	assert.Equal(t, 0, checkpointCount, "Should have 0 Checkpoint calls (disabled)")
@@ -295,43 +294,43 @@ func TestMetricsFiltering(t *testing.T) {
 func TestMetricsFilteringOrderIndependence(t *testing.T) {
 	testStats1 := &TestStatReceiver{}
 	testStats2 := &TestStatReceiver{}
-	
+
 	metricsConfig := MetricsConfig{
 		EnableRecordsInMemory: true,
 		// All others default to false
 	}
-	
+
 	// Test order 1: WithStats first, then WithMetricsConfig
 	config1 := NewConfig().
 		WithStats(testStats1).
 		WithMetricsConfig(metricsConfig)
-	
-	// Test order 2: WithMetricsConfig first, then WithStats  
+
+	// Test order 2: WithMetricsConfig first, then WithStats
 	config2 := NewConfig().
 		WithMetricsConfig(metricsConfig).
 		WithStats(testStats2)
-	
+
 	// Simulate what happens in NewWithInterfaces - apply the filtering
 	filteredStats1 := newFilteredStatReceiver(config1.stats, config1.metricsConfig)
 	filteredStats2 := newFilteredStatReceiver(config2.stats, config2.metricsConfig)
-	
+
 	// Call all methods on both filtered receivers
 	filteredStats1.Checkpoint()
 	filteredStats1.RecordsInMemory(100)
 	filteredStats1.RecordsInMemoryBytes(500)
-	
-	filteredStats2.Checkpoint() 
+
+	filteredStats2.Checkpoint()
 	filteredStats2.RecordsInMemory(100)
 	filteredStats2.RecordsInMemoryBytes(500)
-	
+
 	// Both should have identical behavior regardless of order
 	recordCount1, byteCount1, checkpointCount1, _, _ := testStats1.GetCallCounts()
 	recordCount2, byteCount2, checkpointCount2, _, _ := testStats2.GetCallCounts()
-	
+
 	assert.Equal(t, recordCount1, recordCount2, "RecordsInMemory calls should be identical regardless of order")
-	assert.Equal(t, byteCount1, byteCount2, "RecordsInMemoryBytes calls should be identical regardless of order") 
+	assert.Equal(t, byteCount1, byteCount2, "RecordsInMemoryBytes calls should be identical regardless of order")
 	assert.Equal(t, checkpointCount1, checkpointCount2, "Checkpoint calls should be identical regardless of order")
-	
+
 	// Verify the expected filtering (only RecordsInMemory should be called)
 	assert.Equal(t, 1, recordCount1, "Should have 1 RecordsInMemory call")
 	assert.Equal(t, 0, byteCount1, "Should have 0 RecordsInMemoryBytes calls (disabled)")
