@@ -21,7 +21,6 @@ type TestStatReceiver struct {
 	checkpointCalls           int
 	eventToClientCalls        int
 	eventsFromKinesisCalls    []EventsFromKinesisCall
-	config                    *MetricsConfig // nil means all enabled
 }
 
 // EventsFromKinesisCall captures the parameters of EventsFromKinesis calls
@@ -31,60 +30,43 @@ type EventsFromKinesisCall struct {
 	Lag     time.Duration
 }
 
-// WithMetricsConfig implements the ConfigurableStatReceiver interface
-func (t *TestStatReceiver) WithMetricsConfig(config MetricsConfig) StatReceiver {
-	return &TestStatReceiver{
-		config: &config,
-	}
-}
-
 // Checkpoint captures checkpoint calls
 func (t *TestStatReceiver) Checkpoint() {
-	if t.config == nil || t.config.EnableCheckpoint {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.checkpointCalls++
-	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.checkpointCalls++
 }
 
 // EventToClient captures event to client calls
 func (t *TestStatReceiver) EventToClient(inserted, retrieved time.Time) {
-	if t.config == nil || t.config.EnableEventToClient {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.eventToClientCalls++
-	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.eventToClientCalls++
 }
 
 // EventsFromKinesis captures events from kinesis calls
 func (t *TestStatReceiver) EventsFromKinesis(num int, shardID string, lag time.Duration) {
-	if t.config == nil || t.config.EnableEventsFromKinesis {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.eventsFromKinesisCalls = append(t.eventsFromKinesisCalls, EventsFromKinesisCall{
-			Num:     num,
-			ShardID: shardID,
-			Lag:     lag,
-		})
-	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.eventsFromKinesisCalls = append(t.eventsFromKinesisCalls, EventsFromKinesisCall{
+		Num:     num,
+		ShardID: shardID,
+		Lag:     lag,
+	})
 }
 
 // RecordsInMemory captures records in memory calls
 func (t *TestStatReceiver) RecordsInMemory(count int64) {
-	if t.config == nil || t.config.EnableRecordsInMemory {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.recordsInMemoryCalls = append(t.recordsInMemoryCalls, count)
-	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recordsInMemoryCalls = append(t.recordsInMemoryCalls, count)
 }
 
 // RecordsInMemoryBytes captures records in memory bytes calls
 func (t *TestStatReceiver) RecordsInMemoryBytes(bytes int64) {
-	if t.config == nil || t.config.EnableRecordsInMemoryBytes {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.recordsInMemoryBytesCalls = append(t.recordsInMemoryBytesCalls, bytes)
-	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recordsInMemoryBytesCalls = append(t.recordsInMemoryBytesCalls, bytes)
 }
 
 // Helper methods for testing
@@ -273,43 +255,84 @@ func TestMetricsBasic(t *testing.T) {
 	assert.True(t, hasNonZeroRecords, "Should have non-zero records in memory at some point")
 	assert.True(t, hasNonZeroBytes, "Should have non-zero bytes in memory at some point")
 
-	t.Logf("✓ Metrics test completed - RecordsInMemory calls: %v, RecordsInMemoryBytes calls: %v", 
+	t.Logf("✓ Metrics test completed - RecordsInMemory calls: %v, RecordsInMemoryBytes calls: %v",
 		recordCalls, byteCalls)
 }
 
-// TestMetricsFiltering tests that metrics can be selectively enabled/disabled
+// TestMetricsFiltering tests that metrics can be selectively enabled/disabled using the filteredStatReceiver
 func TestMetricsFiltering(t *testing.T) {
 	// Test that only RecordsInMemory metrics are captured when others are disabled
 	testStats := &TestStatReceiver{}
-	
+
 	// Configure to only enable RecordsInMemory
 	metricsConfig := MetricsConfig{
 		EnableRecordsInMemory: true,
 		// All others default to false
 	}
-	
-	// Apply filtering using the TestStatReceiver's WithMetricsConfig method
-	filteredStats, ok := interface{}(testStats).(ConfigurableStatReceiver)
-	if !ok {
-		t.Skip("TestStatReceiver doesn't implement ConfigurableStatReceiver, skipping filtering test")
-	}
-	
-	configuredStats := filteredStats.WithMetricsConfig(metricsConfig)
-	
-	// Call all methods
-	configuredStats.Checkpoint()
-	configuredStats.EventToClient(time.Now(), time.Now())
-	configuredStats.EventsFromKinesis(5, "shard-001", time.Second)
-	configuredStats.RecordsInMemory(100)
-	configuredStats.RecordsInMemoryBytes(500)
-	
-	// Verify only RecordsInMemory was called
-	receiverStats := configuredStats.(*TestStatReceiver)
-	recordCount, byteCount, checkpointCount, eventToClientCount, eventsFromKinesisCount := receiverStats.GetCallCounts()
-	
+
+	// Create a filtered stat receiver using the new approach (simulating WithStats behavior)
+	filteredStats := newFilteredStatReceiver(testStats, metricsConfig)
+
+	// Call all methods on the filtered receiver
+	filteredStats.Checkpoint()
+	filteredStats.EventToClient(time.Now(), time.Now())
+	filteredStats.EventsFromKinesis(5, "shard-001", time.Second)
+	filteredStats.RecordsInMemory(100)
+	filteredStats.RecordsInMemoryBytes(500)
+
+	// Verify only RecordsInMemory was called on the underlying receiver
+	recordCount, byteCount, checkpointCount, eventToClientCount, eventsFromKinesisCount := testStats.GetCallCounts()
+
 	assert.Equal(t, 1, recordCount, "Should have 1 RecordsInMemory call")
 	assert.Equal(t, 0, byteCount, "Should have 0 RecordsInMemoryBytes calls (disabled)")
 	assert.Equal(t, 0, checkpointCount, "Should have 0 Checkpoint calls (disabled)")
 	assert.Equal(t, 0, eventToClientCount, "Should have 0 EventToClient calls (disabled)")
 	assert.Equal(t, 0, eventsFromKinesisCount, "Should have 0 EventsFromKinesis calls (disabled)")
+}
+
+// TestMetricsFilteringOrderIndependence tests that the order of WithStats() and WithMetricsConfig() doesn't matter
+func TestMetricsFilteringOrderIndependence(t *testing.T) {
+	testStats1 := &TestStatReceiver{}
+	testStats2 := &TestStatReceiver{}
+
+	metricsConfig := MetricsConfig{
+		EnableRecordsInMemory: true,
+		// All others default to false
+	}
+
+	// Test order 1: WithStats first, then WithMetricsConfig
+	config1 := NewConfig().
+		WithStats(testStats1).
+		WithMetricsConfig(metricsConfig)
+
+	// Test order 2: WithMetricsConfig first, then WithStats
+	config2 := NewConfig().
+		WithMetricsConfig(metricsConfig).
+		WithStats(testStats2)
+
+	// Simulate what happens in NewWithInterfaces - apply the filtering
+	filteredStats1 := newFilteredStatReceiver(config1.stats, config1.metricsConfig)
+	filteredStats2 := newFilteredStatReceiver(config2.stats, config2.metricsConfig)
+
+	// Call all methods on both filtered receivers
+	filteredStats1.Checkpoint()
+	filteredStats1.RecordsInMemory(100)
+	filteredStats1.RecordsInMemoryBytes(500)
+
+	filteredStats2.Checkpoint()
+	filteredStats2.RecordsInMemory(100)
+	filteredStats2.RecordsInMemoryBytes(500)
+
+	// Both should have identical behavior regardless of order
+	recordCount1, byteCount1, checkpointCount1, _, _ := testStats1.GetCallCounts()
+	recordCount2, byteCount2, checkpointCount2, _, _ := testStats2.GetCallCounts()
+
+	assert.Equal(t, recordCount1, recordCount2, "RecordsInMemory calls should be identical regardless of order")
+	assert.Equal(t, byteCount1, byteCount2, "RecordsInMemoryBytes calls should be identical regardless of order")
+	assert.Equal(t, checkpointCount1, checkpointCount2, "Checkpoint calls should be identical regardless of order")
+
+	// Verify the expected filtering (only RecordsInMemory should be called)
+	assert.Equal(t, 1, recordCount1, "Should have 1 RecordsInMemory call")
+	assert.Equal(t, 0, byteCount1, "Should have 0 RecordsInMemoryBytes calls (disabled)")
+	assert.Equal(t, 0, checkpointCount1, "Should have 0 Checkpoint calls (disabled)")
 }

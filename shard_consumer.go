@@ -6,15 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/twitchscience/kinsumer/kinsumeriface"
 	"time"
+
+	"github.com/twitchscience/kinsumer/kinsumeriface"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	ktypes "github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	smithy "github.com/aws/smithy-go"
 )
-
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinsumeriface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorStartTimestamp *time.Time) (string, error) {
@@ -228,14 +228,14 @@ mainloop:
 		// Put all the records we got onto the channel
 		k.config.stats.EventsFromKinesis(len(records), shardID, lag)
 		k.metricsManager.updateMetric(RecordsIncrement, int64(len(records)))
-		
+
 		// Calculate total payload bytes in the batch
 		totalBytes := int64(0)
 		for _, record := range records {
 			totalBytes += int64(len(record.Data))
 		}
 		k.metricsManager.updateMetric(BytesIncrement, totalBytes)
-		
+
 		// Track records for cleanup in case of early return
 		recordsToCleanup := int64(len(records))
 		bytesToCleanup := totalBytes
@@ -248,7 +248,7 @@ mainloop:
 				k.metricsManager.updateMetric(BytesDecrement, bytesToCleanup)
 			}
 		}()
-		
+
 		if len(records) > 0 {
 			retrievedAt := time.Now()
 			for _, record := range records {
@@ -274,8 +274,8 @@ mainloop:
 						retrievedAt:  retrievedAt,
 						payloadBytes: recordPayloadBytes,
 					}:
-						recordsToCleanup-- // Record successfully sent to channel
-						bytesToCleanup -= recordPayloadBytes // Decrement bytes for successfully sent record
+						recordsToCleanup--                         // Record successfully sent to channel
+						bytesToCleanup -= recordPayloadBytes       // Decrement bytes for successfully sent record
 						checkpointer.lastRecordPassed = time.Now() // Mark the time so we don't retain shards when we're too slow to do so
 						lastSeqToCheckp = aws.ToString(record.SequenceNumber)
 						break RecordLoop
@@ -286,7 +286,7 @@ mainloop:
 			// Update the last sequence number we saw, in case we reached the end of the stream.
 			lastSeqNum = aws.ToString(records[len(records)-1].SequenceNumber)
 		}
-		
+
 		// Release semaphore after successfully processing all records from this batch
 		releaseSemaphore()
 		iterator = next

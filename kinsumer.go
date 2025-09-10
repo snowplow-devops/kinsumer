@@ -225,6 +225,12 @@ func NewWithInterfaces(
 		config.clientRecordMaxAge = &maxAge
 	}
 
+	// Wrap the stats receiver with filtering based on metrics configuration
+	// This happens after config validation to ensure we have the final configuration
+	if config.stats != nil {
+		config.stats = newFilteredStatReceiver(config.stats, config.metricsConfig)
+	}
+
 	consumer := &Kinsumer{
 		streamName:            streamName,
 		kinesis:               kinesis,
