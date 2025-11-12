@@ -689,3 +689,237 @@ ProcessLoop:
 
 	t.Logf("Got all %d out of %d events\n", total, numberOfEventsToTest)
 }
+
+// TestIteratorStartTimestampCheckpoints demonstrates what happens to checkpoint records
+// when using iteratorStartTimestamp - specifically showing the behavior with old closed shards
+// vs new open shards
+func TestIteratorStartTimestampCheckpoints(t *testing.T) {
+	streamName := "TestIteratorStartTimestamp_stream"
+
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	k, d := kinesisAndDynamoInstances(t)
+
+	defer func() {
+		err := cleanupTestEnvironment(t, k, d, streamName)
+		require.NoError(t, err, "Problems cleaning up the test environment")
+	}()
+
+	// Setup stream with 2 shards
+	err := setupTestEnvironment(t, k, d, streamName, 2)
+	require.NoError(t, err, "Problems setting up the test environment")
+
+	// Put "old" data (before our cutoff timestamp)
+	t.Log("=== Putting 100 'old' records ===")
+	err = spamStream(t, k, 100, streamName)
+	require.NoError(t, err, "spamStream() failed")
+
+	// Establish cutoff timestamp with clear separation
+	t.Log("=== Waiting to establish timestamp cutoff ===")
+	time.Sleep(2 * time.Second)
+	cutoffTimestamp := time.Now()
+	t.Logf("Cutoff timestamp: %s", cutoffTimestamp.Format(time.RFC3339))
+	time.Sleep(2 * time.Second)
+
+	// Get initial shards before merge
+	desc, err := k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+		StreamName: aws.String(streamName),
+		Limit:      aws.Int32(shardLimit),
+	})
+	require.NoError(t, err, "Error describing stream")
+	initialShards := desc.StreamDescription.Shards
+	require.True(t, len(initialShards) >= 2, "Need at least 2 shards for merge")
+
+	// Merge shards to create CLOSED parent shards
+	t.Log("=== Merging shards to create CLOSED shards ===")
+	_, err = k.MergeShards(t.Context(), &kinesis.MergeShardsInput{
+		StreamName:           aws.String(streamName),
+		ShardToMerge:         aws.String(*initialShards[0].ShardId),
+		AdjacentShardToMerge: aws.String(*initialShards[1].ShardId),
+	})
+	require.NoError(t, err, "Problem merging shards")
+
+	// Wait for merge to complete
+	timeout := time.After(30 * time.Second)
+	for {
+		desc, err = k.DescribeStream(t.Context(), &kinesis.DescribeStreamInput{
+			StreamName: aws.String(streamName),
+			Limit:      aws.Int32(shardLimit),
+		})
+		require.NoError(t, err, "Error describing stream during merge wait")
+		if desc.StreamDescription.StreamStatus == "ACTIVE" {
+			break
+		}
+		select {
+		case <-timeout:
+			require.FailNow(t, "Timeout waiting for merge to complete")
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Get all shards after merge and categorize them
+	allShards, err := loadShardIDsFromKinesis(k, streamName)
+	require.NoError(t, err, "Error loading shard IDs")
+
+	// Manually categorize shards as open/closed by checking EndingSequenceNumber
+	openShardIDs := make([]string, 0)
+	closedShardIDs := make([]string, 0)
+	for _, shard := range desc.StreamDescription.Shards {
+		shardID := *shard.ShardId
+		if shard.SequenceNumberRange.EndingSequenceNumber == nil {
+			openShardIDs = append(openShardIDs, shardID)
+		} else {
+			closedShardIDs = append(closedShardIDs, shardID)
+		}
+	}
+
+	t.Logf("=== After merge: %d total shards ===", len(allShards))
+	t.Logf("  - %d OPEN shards: %v", len(openShardIDs), openShardIDs)
+	t.Logf("  - %d CLOSED shards: %v", len(closedShardIDs), closedShardIDs)
+
+	// Put "new" data (after the cutoff timestamp)
+	t.Log("=== Putting 100 'new' records ===")
+	err = spamStream(t, k, 100, streamName)
+	require.NoError(t, err, "spamStream() failed")
+
+	// Create Kinsumer with iteratorStartTimestamp
+	t.Log("=== Creating Kinsumer with AT_TIMESTAMP iterator ===")
+	config := NewConfig().
+		WithBufferSize(1000).
+		WithShardCheckFrequency(500 * time.Millisecond).
+		WithLeaderActionFrequency(500 * time.Millisecond).
+		WithCommitFrequency(100 * time.Millisecond).
+		WithIteratorStartTimestamp(&cutoffTimestamp)
+
+	kinsumer, err := NewWithInterfaces(k, d, streamName, *applicationName, "timestamp_test_client", "", config)
+	require.NoError(t, err, "NewWithInterfaces() failed")
+
+	// Start kinsumer and let it capture shards
+	err = kinsumer.Run()
+	require.NoError(t, err, "kinsumer.Run() failed")
+
+	// Consume records in background
+	go func() {
+		for {
+			_, err := kinsumer.Next()
+			if err != nil || err == nil {
+				// Just consume, don't care about errors for this test
+			}
+		}
+	}()
+
+	// Give it time to capture shards and create checkpoints
+	t.Log("=== Waiting for shard capture and checkpoint creation (3 seconds) ===")
+	time.Sleep(3 * time.Second)
+
+	// Stop kinsumer
+	kinsumer.Stop()
+
+	// Load and analyze checkpoint records
+	t.Log("")
+	t.Log("=================================================================")
+	t.Log("=== CHECKPOINT TABLE ANALYSIS ===")
+	t.Log("=================================================================")
+	t.Log("")
+
+	checkpoints, err := loadCheckpoints(d, fmt.Sprintf("%s_checkpoints", *applicationName))
+	require.NoError(t, err, "loadCheckpoints() failed")
+
+	// Get shard details from Kinesis for status
+	shardDetails := make(map[string]bool) // true = CLOSED, false = OPEN
+	for _, shard := range desc.StreamDescription.Shards {
+		shardID := *shard.ShardId
+		isClosed := shard.SequenceNumberRange.EndingSequenceNumber != nil
+		shardDetails[shardID] = isClosed
+	}
+
+	// Analyze checkpoints for old CLOSED shards
+	t.Log("OLD CLOSED SHARDS (existed before timestamp):")
+	t.Log("---------------------------------------------")
+	orphanedCount := 0
+	for _, shardID := range closedShardIDs {
+		cp, exists := checkpoints[shardID]
+		if !exists {
+			t.Logf("  %s: NO CHECKPOINT RECORD", shardID)
+			continue
+		}
+
+		status := "✓ OK"
+		if cp.SequenceNumber == nil && cp.Finished == nil && cp.OwnerID == nil {
+			status = "⚠️  ORPHANED"
+			orphanedCount++
+		}
+
+		t.Logf("  %s (CLOSED):", shardID)
+		t.Logf("    SequenceNumber: %v", formatPointer(cp.SequenceNumber))
+		t.Logf("    Finished: %v", formatPointer(cp.Finished))
+		t.Logf("    OwnerID: %v", formatPointer(cp.OwnerID))
+		t.Logf("    Status: %s", status)
+		t.Log("")
+	}
+
+	// Analyze checkpoints for new OPEN shards
+	t.Log("NEW OPEN SHARDS (created after timestamp):")
+	t.Log("-------------------------------------------")
+	for _, shardID := range openShardIDs {
+		cp, exists := checkpoints[shardID]
+		if !exists {
+			t.Logf("  %s: NO CHECKPOINT RECORD", shardID)
+			continue
+		}
+
+		status := "✓ Being processed"
+		if cp.OwnerID == nil {
+			status = "○ Not yet captured"
+		}
+
+		t.Logf("  %s (OPEN):", shardID)
+		t.Logf("    SequenceNumber: %v", formatPointer(cp.SequenceNumber))
+		t.Logf("    Finished: %v", formatPointer(cp.Finished))
+		t.Logf("    OwnerID: %v", formatPointer(cp.OwnerID))
+		t.Logf("    Status: %s", status)
+		t.Log("")
+	}
+
+	// Summary
+	t.Log("=================================================================")
+	t.Log("SUMMARY:")
+	t.Log("=================================================================")
+	t.Logf("Total shards in stream: %d", len(allShards))
+	t.Logf("  - OPEN shards: %d", len(openShardIDs))
+	t.Logf("  - CLOSED shards: %d", len(closedShardIDs))
+	t.Log("")
+	t.Logf("Total checkpoint records: %d", len(checkpoints))
+	t.Logf("Orphaned checkpoint records: %d", orphanedCount)
+	t.Log("")
+
+	if orphanedCount > 0 {
+		t.Logf("⚠️  PROBLEM DEMONSTRATED: %d old closed shards have orphaned checkpoints!", orphanedCount)
+		t.Log("These checkpoints have no SequenceNumber, no Finished marker, and no Owner.")
+		t.Log("They will remain in the table indefinitely unless manually cleaned up.")
+	} else {
+		t.Log("✓ No orphaned checkpoints found")
+	}
+	t.Log("=================================================================")
+}
+
+// formatPointer formats a pointer value for logging
+func formatPointer(ptr interface{}) string {
+	switch v := ptr.(type) {
+	case *string:
+		if v == nil {
+			return "<nil>"
+		}
+		return fmt.Sprintf("\"%s\"", *v)
+	case *int64:
+		if v == nil {
+			return "<nil>"
+		}
+		return fmt.Sprintf("%d", *v)
+	default:
+		return fmt.Sprintf("%v", ptr)
+	}
+}
