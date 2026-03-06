@@ -243,10 +243,6 @@ func validateConfig(c *Config) error {
 		return ErrConfigInvalidLeaderActionFrequency
 	}
 
-	if c.bufferSize == 0 {
-		return ErrConfigInvalidBufferSize
-	}
-
 	if c.stats == nil {
 		return ErrConfigInvalidStats
 	}

@@ -45,10 +45,6 @@ func TestConfigErrors(t *testing.T) {
 	err = validateConfig(&config)
 	require.EqualError(t, err, ErrConfigInvalidLeaderActionFrequency.Error())
 
-	config = NewConfig().WithBufferSize(0)
-	err = validateConfig(&config)
-	require.EqualError(t, err, ErrConfigInvalidBufferSize.Error())
-
 	config = NewConfig().WithStats(nil)
 	err = validateConfig(&config)
 	require.EqualError(t, err, ErrConfigInvalidStats.Error())

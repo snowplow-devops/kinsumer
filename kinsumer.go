@@ -736,34 +736,6 @@ func (k *Kinsumer) NextRecordWithCheckpointer() (rec *ktypes.Record, checkpointe
 	return rec, checkpointer, err
 }
 
-// NextRecordWithCheckpointerContext is a blocking function used to get the next record from the kinesis queue, or errors that
-// occurred during the processing of kinesis. It respects context cancellation. It's up to the caller to stop processing by calling 'Stop()'
-// checkpointer must be called when the record is fully processed. Kinsumer will ensure checkpointer calls are ordered.
-// WARNING: checkpointer() can block indefinitely if not called in order.
-//
-// if err is non nil an error occurred in the system (including context cancellation).
-// if err is nil and rec is nil then kinsumer has been stopped
-func (k *Kinsumer) NextRecordWithCheckpointerContext(ctx context.Context) (rec *ktypes.Record, checkpointer func(), err error) {
-	if !k.config.manualCheckpointing {
-		return nil, nil, fmt.Errorf("manual checkpointing is disabled, use NextRecord() instead")
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	case err = <-k.errors:
-		return nil, nil, err
-	case record, ok := <-k.output:
-		if ok {
-			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
-			rec = record.record
-			checkpointer = record.checkpointer.updateFunc(aws.ToString(record.record.SequenceNumber))
-		}
-	}
-
-	return rec, checkpointer, err
-}
-
 // CreateRequiredTables will create the required dynamodb tables
 // based on the applicationName
 func (k *Kinsumer) CreateRequiredTables() error {
